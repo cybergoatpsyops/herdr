@@ -177,7 +177,11 @@ impl AppState {
         };
         match ch {
             'q' => self.exit_copy_mode(terminal_runtimes, false),
-            'y' => self.exit_copy_mode(terminal_runtimes, true),
+            'y' => {
+                let selection = self.selection.clone();
+                self.copy_selection(terminal_runtimes);
+                self.selection = selection;
+            }
             'v' | ' ' => self.begin_copy_mode_selection(terminal_runtimes),
             'V' => self.select_copy_mode_line(terminal_runtimes),
             'h' => self.move_copy_cursor(terminal_runtimes, 0, -1),
@@ -1765,8 +1769,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copy_mode_shift_v_y_copies_visible_line() {
-        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
+    async fn copy_mode_shift_v_y_preserves_linewise_selection_for_repeated_copy() {
+        let (mut app, pane_id) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\n");
         app.state.enter_copy_mode(&app.terminal_runtimes);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 1;
@@ -1774,10 +1778,44 @@ mod tests {
         }
 
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::SHIFT));
+        let before_y = app.state.copy_mode.as_ref().expect("copy mode").clone();
+        let viewport_before_y = copy_mode_viewport_top_row(&app, pane_id);
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
 
         assert_eq!(copy_mode_clipboard_text(&mut app), "beta");
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(app.state.copy_mode.as_ref(), Some(&before_y));
+        assert_eq!(copy_mode_viewport_top_row(&app, pane_id), viewport_before_y);
+        let selection = app.state.selection.as_ref().expect("active selection");
+        assert!(selection.is_visible());
+        assert!(!selection.is_finalized());
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty()));
+        let extended = app.state.copy_mode.as_ref().expect("copy mode").clone();
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(copy_mode_clipboard_text(&mut app), "beta\ngamma");
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(app.state.copy_mode.as_ref(), Some(&extended));
+        assert!(app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(Selection::is_visible));
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(copy_mode_clipboard_text(&mut app), "beta\ngamma");
+        assert_eq!(app.state.copy_mode.as_ref(), Some(&extended));
+        assert!(app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(Selection::is_visible));
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(copy_mode_clipboard_text(&mut app), "beta\ngamma");
         assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.copy_mode.is_none());
+        assert!(app.state.selection.is_none());
     }
 
     #[tokio::test]
@@ -1869,7 +1907,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(copy_mode_clipboard_text(&mut app), expected);
-        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(copy_mode_viewport_top_row(&app, pane_id), cursor_row);
+        assert!(app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(Selection::is_visible));
     }
 
     #[tokio::test]
@@ -2012,8 +2056,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn copy_mode_v_y_copies_selection_and_exits() {
-        let (mut app, _) = app_with_copy_screen(b"alpha\nbeta\n");
+    async fn copy_mode_v_y_preserves_character_selection_for_repeated_copy() {
+        let (mut app, pane_id) = app_with_copy_screen(b"alpha\nbeta\n");
         app.state.enter_copy_mode(&app.terminal_runtimes);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 0;
@@ -2022,14 +2066,44 @@ mod tests {
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::empty()));
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty()));
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        let before_y = app.state.copy_mode.as_ref().expect("copy mode").clone();
+        let viewport_before_y = copy_mode_viewport_top_row(&app, pane_id);
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
 
-        match app.event_rx.try_recv().expect("clipboard event") {
-            AppEvent::ClipboardWrite { content } => assert_eq!(content, b"alp"),
-            other => panic!("unexpected event: {other:?}"),
-        }
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alp");
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(app.state.copy_mode.as_ref(), Some(&before_y));
+        assert_eq!(copy_mode_viewport_top_row(&app, pane_id), viewport_before_y);
+        let selection = app.state.selection.as_ref().expect("active selection");
+        assert!(selection.is_visible());
+        assert!(!selection.is_finalized());
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty()));
+        let extended = app.state.copy_mode.as_ref().expect("copy mode").clone();
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alph");
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(app.state.copy_mode.as_ref(), Some(&extended));
+        assert!(app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(Selection::is_visible));
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alph");
+        assert_eq!(app.state.copy_mode.as_ref(), Some(&extended));
+        assert!(app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(Selection::is_visible));
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alph");
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(app.state.copy_mode.is_none());
+        assert!(app.state.selection.is_none());
     }
 
     #[tokio::test]
@@ -2048,7 +2122,18 @@ mod tests {
 
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
         assert_eq!(copy_mode_clipboard_text(&mut app), "alp");
-        assert_eq!(app.state.mode, Mode::Terminal);
-        assert!(app.state.copy_mode.is_none());
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(
+            app.state
+                .copy_mode
+                .as_ref()
+                .and_then(|copy_mode| copy_mode.selection),
+            Some(CopyModeSelection::Character)
+        );
+        assert!(app
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(Selection::is_visible));
     }
 }
