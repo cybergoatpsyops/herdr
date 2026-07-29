@@ -245,7 +245,10 @@ pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
 }
 
 fn valid_session_id(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_SESSION_ID_LEN && !value.chars().any(char::is_control)
+    !value.is_empty()
+        && value.len() <= MAX_SESSION_ID_LEN
+        && !value.starts_with('-')
+        && !value.chars().any(char::is_control)
 }
 
 fn valid_session_path(value: &str) -> bool {
@@ -374,6 +377,12 @@ mod tests {
             vec!["omp", format!("--resume={omp_session}").as_str()]
         );
         assert_eq!(
+            plan("herdr:omp", "omp", &AgentSessionRef::id("omp-id").unwrap())
+                .unwrap()
+                .argv,
+            vec!["omp", "--resume=omp-id"]
+        );
+        assert_eq!(
             plan(
                 "herdr:hermes",
                 "hermes",
@@ -486,6 +495,15 @@ mod tests {
             &AgentSessionRef {
                 kind: AgentSessionRefKind::Id,
                 value: "bad\nid".into(),
+            }
+        )
+        .is_none());
+        assert!(plan(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Id,
+                value: "--help".into(),
             }
         )
         .is_none());
