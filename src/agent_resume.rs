@@ -54,14 +54,18 @@ pub fn session_ref_from_report(
     source: &str,
     agent: &str,
     agent_session_id: Option<String>,
-    _agent_session_path: Option<String>,
+    agent_session_path: Option<String>,
 ) -> Option<AgentSessionRef> {
     if !is_official_agent_source(source, agent) {
         return None;
     }
 
-    if agent == "pi" || agent == "omp" {
-        return _agent_session_path
+    if agent == "pi" {
+        return agent_session_path.and_then(AgentSessionRef::path);
+    }
+
+    if agent == "omp" {
+        return agent_session_path
             .and_then(AgentSessionRef::path)
             .or_else(|| agent_session_id.and_then(AgentSessionRef::id));
     }
@@ -103,6 +107,7 @@ pub fn session_ref_from_snapshot(
     }
     let session_ref = match (agent, kind) {
         ("pi" | "omp", AgentSessionRefKind::Path) => AgentSessionRef::path(value)?,
+        ("pi", AgentSessionRefKind::Id) => return None,
         (_, AgentSessionRefKind::Id) => AgentSessionRef::id(value)?,
         _ => return None,
     };
@@ -116,6 +121,16 @@ pub fn session_ref_from_snapshot(
 pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<AgentResumePlan> {
     if !is_official_agent_source(source, agent) {
         return None;
+    }
+
+    // Public fields can bypass constructors; re-validate at the execution boundary.
+    match session_ref.kind {
+        AgentSessionRefKind::Id => {
+            AgentSessionRef::id(session_ref.value.as_str())?;
+        }
+        AgentSessionRefKind::Path => {
+            AgentSessionRef::path(session_ref.value.as_str())?;
+        }
     }
 
     let argv = match (source, agent, session_ref.kind) {
@@ -148,7 +163,7 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
                 session_ref.value.clone(),
             ]
         }
-        ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
+        ("herdr:pi", "pi", AgentSessionRefKind::Path) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
         }
         ("herdr:omp", "omp", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
@@ -201,10 +216,11 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
 }
 
 pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {
-    format!(
-        "{source}\u{0}{agent}\u{0}{:?}\u{0}{}",
-        session_ref.kind, session_ref.value
-    )
+    let kind = match session_ref.kind {
+        AgentSessionRefKind::Id => "Id",
+        AgentSessionRefKind::Path => "Path",
+    };
+    format!("{source}\u{0}{agent}\u{0}{kind}\u{0}{}", session_ref.value)
 }
 
 pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
@@ -434,6 +450,159 @@ mod tests {
             &AgentSessionRef::path(&claude_session).unwrap()
         )
         .is_none());
+        assert!(plan(
+            "herdr:pi",
+            "pi",
+            &AgentSessionRef::id("pi-session").unwrap()
+        )
+        .is_none());
+        assert!(plan(
+            "herdr:pi",
+            "pi",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Path,
+                value: "relative.jsonl".into(),
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn planner_rejects_structurally_invalid_public_refs() {
+        let absolute = absolute_test_path("valid-session.jsonl");
+
+        assert!(plan(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Id,
+                value: String::new(),
+            }
+        )
+        .is_none());
+        assert!(plan(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Id,
+                value: "bad\nid".into(),
+            }
+        )
+        .is_none());
+        assert!(plan(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Id,
+                value: "a".repeat(MAX_SESSION_ID_LEN + 1),
+            }
+        )
+        .is_none());
+
+        assert!(plan(
+            "herdr:omp",
+            "omp",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Path,
+                value: String::new(),
+            }
+        )
+        .is_none());
+        assert!(plan(
+            "herdr:omp",
+            "omp",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Path,
+                value: "relative.jsonl".into(),
+            }
+        )
+        .is_none());
+        assert!(plan(
+            "herdr:omp",
+            "omp",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Path,
+                value: format!("{absolute}\n"),
+            }
+        )
+        .is_none());
+        assert!(plan(
+            "herdr:omp",
+            "omp",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Path,
+                value: format!("{}/{}", absolute, "a".repeat(MAX_SESSION_PATH_LEN)),
+            }
+        )
+        .is_none());
+
+        // Valid structurally, but still rejected by agent kind allowlist.
+        assert!(plan(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Path,
+                value: absolute.clone(),
+            }
+        )
+        .is_none());
+
+        // Valid public id/path values still plan for supported agents.
+        assert!(plan(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Id,
+                value: "claude-session".into(),
+            }
+        )
+        .is_some());
+        assert!(plan(
+            "herdr:omp",
+            "omp",
+            &AgentSessionRef {
+                kind: AgentSessionRefKind::Path,
+                value: absolute,
+            }
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn dedupe_key_uses_stable_kind_tokens() {
+        let path = absolute_test_path("session.jsonl");
+        assert_eq!(
+            dedupe_key(
+                "herdr:claude",
+                "claude",
+                &AgentSessionRef {
+                    kind: AgentSessionRefKind::Id,
+                    value: "claude-session".into(),
+                }
+            ),
+            "herdr:claude\u{0}claude\u{0}Id\u{0}claude-session"
+        );
+        assert_eq!(
+            dedupe_key(
+                "herdr:pi",
+                "pi",
+                &AgentSessionRef {
+                    kind: AgentSessionRefKind::Path,
+                    value: path.clone(),
+                }
+            ),
+            format!("herdr:pi\u{0}pi\u{0}Path\u{0}{path}")
+        );
+        assert_eq!(
+            plan(
+                "herdr:codex",
+                "codex",
+                &AgentSessionRef::id("codex-session").unwrap()
+            )
+            .unwrap()
+            .dedupe_key,
+            "herdr:codex\u{0}codex\u{0}Id\u{0}codex-session"
+        );
     }
 
     #[test]
@@ -452,6 +621,15 @@ mod tests {
         assert_eq!(session_ref.kind, AgentSessionRefKind::Path);
         assert_eq!(session_ref.value, pi_session);
 
+        assert!(session_ref_from_report("herdr:pi", "pi", Some("pi-id".into()), None).is_none());
+        assert!(session_ref_from_report("herdr:pi", "pi", None, None).is_none());
+        assert!(session_ref_from_report(
+            "herdr:pi",
+            "pi",
+            Some("pi-id".into()),
+            Some("relative.jsonl".into())
+        )
+        .is_none());
         assert!(session_ref_from_report("herdr:pi", "pi", Some("bad\nid".into()), None).is_none());
         assert!(
             session_ref_from_report("herdr:pi", "pi", None, Some("relative.jsonl".into()))
@@ -543,6 +721,27 @@ mod tests {
                 .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "qoder-id");
+    }
+
+    #[test]
+    fn snapshot_accepts_only_valid_pi_paths() {
+        let pi_session = absolute_test_path("pi-session.jsonl");
+        let persisted =
+            session_ref_from_snapshot("herdr:pi", "pi", AgentSessionRefKind::Path, &pi_session)
+                .unwrap();
+        assert_eq!(persisted.session_ref.kind, AgentSessionRefKind::Path);
+        assert_eq!(persisted.session_ref.value, pi_session);
+
+        assert!(
+            session_ref_from_snapshot("herdr:pi", "pi", AgentSessionRefKind::Id, "pi-id").is_none()
+        );
+        assert!(session_ref_from_snapshot(
+            "herdr:pi",
+            "pi",
+            AgentSessionRefKind::Path,
+            "relative.jsonl"
+        )
+        .is_none());
     }
 
     #[test]
