@@ -132,6 +132,7 @@ impl AppState {
                 self.mode,
                 Mode::Terminal
                     | Mode::Navigate
+                    | Mode::AgentPicker
                     | Mode::Resize
                     | Mode::GlobalMenu
                     | Mode::KeybindHelp
@@ -1121,7 +1122,7 @@ impl AppState {
     }
 
     fn handle_mobile_mouse(&mut self, mouse: MouseEvent) -> MobileMouseResult {
-        if self.mode == Mode::Navigate {
+        if matches!(self.mode, Mode::Navigate | Mode::AgentPicker) {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     self.scroll_mobile_switcher_at(mouse.column, mouse.row, -1);
@@ -1138,7 +1139,7 @@ impl AppState {
             return MobileMouseResult::Ignored;
         }
 
-        if self.mode != Mode::Navigate {
+        if !matches!(self.mode, Mode::Navigate | Mode::AgentPicker) {
             if !matches!(self.mode, Mode::Terminal | Mode::Resize) {
                 return MobileMouseResult::Ignored;
             }
@@ -3620,6 +3621,69 @@ mod tests {
     }
 
     #[test]
+    fn agent_picker_can_open_desktop_launcher() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::AgentPicker;
+        let launcher = app.state.global_launcher_rect();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            launcher.x + launcher.width.saturating_sub(1),
+            launcher.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::GlobalMenu);
+    }
+
+    #[test]
+    fn mobile_agent_picker_click_focuses_agent_and_closes_picker() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("one");
+        let first_pane = workspace.tabs[0].root_pane;
+        let target_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(first_pane);
+
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let target_terminal_id = app.state.workspaces[0]
+            .panes
+            .get(&target_pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&target_terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Pi);
+        terminal.state = AgentState::Working;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        assert_eq!(app.state.view.layout, ViewLayout::Mobile);
+        app.state.mode = Mode::AgentPicker;
+
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let click_col = viewport.x + 2;
+        let click_row = viewport.y + 1;
+        assert_eq!(
+            crate::ui::mobile_switcher_target_at(&app.state, click_col, click_row),
+            Some(crate::ui::MobileSwitcherTarget::Agent {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: target_pane,
+            })
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            click_col,
+            click_row,
+        ));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target_pane));
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
     fn mobile_switch_button_opens_switcher_and_workspace_row_switches_workspace() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
@@ -3935,6 +3999,27 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(!app.state.creating_new_tab);
         assert!(!app.state.request_new_tab);
+    }
+
+    #[test]
+    fn mobile_agent_picker_close_returns_to_terminal() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::AgentPicker;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        assert_eq!(app.state.view.layout, ViewLayout::Mobile);
+
+        let close = crate::ui::mobile_switcher_areas(&app.state).close;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            close.x + 1,
+            close.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
