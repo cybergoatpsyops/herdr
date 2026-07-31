@@ -1227,12 +1227,32 @@ impl AppState {
     }
 
     fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
+        let row_range = crate::ui::mobile_switcher_workspace_doc_range(self, idx);
+        self.ensure_mobile_switcher_doc_range_visible(row_range);
+    }
+
+    fn mobile_switcher_agent_doc_range(&self, idx: usize) -> Option<std::ops::Range<usize>> {
+        (idx < crate::ui::agent_panel_entries(self).len()).then(|| {
+            // Agents lead the mobile document: one title row, then two rows for
+            // each entry in the current filtered agent list.
+            let start = 1 + idx * 2;
+            start..start + 2
+        })
+    }
+
+    fn ensure_mobile_agent_visible(&mut self, idx: usize) {
+        let Some(row_range) = self.mobile_switcher_agent_doc_range(idx) else {
+            return;
+        };
+        self.ensure_mobile_switcher_doc_range_visible(row_range);
+    }
+
+    fn ensure_mobile_switcher_doc_range_visible(&mut self, row_range: std::ops::Range<usize>) {
         let viewport = crate::ui::mobile_switcher_areas(self).viewport;
         if viewport.height == 0 {
             return;
         }
 
-        let row_range = crate::ui::mobile_switcher_workspace_doc_range(self, idx);
         let visible_start = self.mobile_switcher_scroll;
         let visible_end = visible_start.saturating_add(viewport.height as usize);
         if row_range.start < visible_start {
@@ -1550,7 +1570,32 @@ impl AppState {
     }
 
     pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
+        if self.view.layout == ViewLayout::Mobile && self.mode == Mode::AgentPicker {
+            self.ensure_mobile_agent_visible(idx);
+            return;
+        }
+
         if self.sidebar_collapsed {
+            let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+            let visible_rows = detail_area.height.saturating_sub(1) as usize;
+            if visible_rows == 0 {
+                return;
+            }
+
+            let entry_count = crate::ui::agent_panel_entries(self).len();
+            let max_scroll = entry_count.saturating_sub(visible_rows);
+            self.agent_panel_scroll = self.agent_panel_scroll.min(max_scroll);
+            if idx >= entry_count {
+                return;
+            }
+
+            let visible_end = self.agent_panel_scroll.saturating_add(visible_rows);
+            if idx < self.agent_panel_scroll {
+                self.agent_panel_scroll = idx;
+            } else if idx >= visible_end {
+                self.agent_panel_scroll = idx.saturating_add(1).saturating_sub(visible_rows);
+            }
+            self.agent_panel_scroll = self.agent_panel_scroll.min(max_scroll);
             return;
         }
 
@@ -4335,6 +4380,50 @@ mod tests {
         assert_eq!(state.workspaces[0].active_tab, last_idx);
         assert!(state.agent_panel_scroll > 0);
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_picker_keeps_mobile_agent_rows_visible() {
+        let mut state = app_with_workspaces(&["a", "b", "c", "d", "e", "f"]);
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            mark_agent(&mut state, ws_idx, 0, pane_id);
+        }
+        state.mode = Mode::AgentPicker;
+        state.view.layout = ViewLayout::Mobile;
+        state.view.mobile_header_rect = ratatui::layout::Rect::new(0, 0, 40, 2);
+        state.view.terminal_area = ratatui::layout::Rect::new(0, 2, 40, 8);
+
+        state.ensure_agent_panel_entry_visible(5);
+
+        // Seven viewport rows contain the selected agent's two-row range only
+        // after scrolling the document down to row six.
+        assert_eq!(state.mobile_switcher_scroll, 6);
+        assert_eq!(state.agent_panel_scroll, 0);
+
+        state.ensure_agent_panel_entry_visible(0);
+        assert_eq!(state.mobile_switcher_scroll, 1);
+    }
+
+    #[test]
+    fn agent_picker_keeps_collapsed_sidebar_entry_visible() {
+        let mut state = app_with_workspaces(&["a", "b", "c", "d", "e", "f"]);
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            mark_agent(&mut state, ws_idx, 0, pane_id);
+        }
+        state.mode = Mode::AgentPicker;
+        state.sidebar_collapsed = true;
+        state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 4, 12);
+
+        state.ensure_agent_panel_entry_visible(5);
+
+        // The collapsed detail section has four usable rows, so the sixth
+        // entry is visible when the entry offset starts at two.
+        assert_eq!(state.agent_panel_scroll, 2);
+
+        state.ensure_agent_panel_entry_visible(1);
+        assert_eq!(state.agent_panel_scroll, 1);
     }
 
     #[test]

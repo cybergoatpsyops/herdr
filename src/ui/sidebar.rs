@@ -843,19 +843,39 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         detail_area.height.saturating_sub(1),
     );
     if detail_content_area != Rect::default() {
-        for (detail_idx, detail) in agent_panel_entries(app).iter().enumerate() {
-            let y = detail_content_area.y + detail_idx as u16;
+        let details = agent_panel_entries(app);
+        let scroll = app.agent_panel_scroll.min(
+            details
+                .len()
+                .saturating_sub(detail_content_area.height as usize),
+        );
+        for (visible_idx, (detail_idx, detail)) in
+            details.iter().enumerate().skip(scroll).enumerate()
+        {
+            let y = detail_content_area.y + visible_idx as u16;
             if y >= detail_content_area.y + detail_content_area.height {
                 break;
             }
             let position = detail_idx + 1;
-            let position_style = Style::default().fg(p.overlay0);
+            let is_selected =
+                matches!(app.mode, Mode::AgentPicker) && detail_idx == app.agent_picker_selected;
+            let row_style = if is_selected {
+                Style::default().bg(p.surface0)
+            } else {
+                Style::default()
+            };
+            let position_style = if is_selected {
+                Style::default().fg(p.text)
+            } else {
+                Style::default().fg(p.overlay0)
+            };
             let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(format!("{position:<2}"), position_style),
                     Span::styled(icon, icon_style),
-                ])),
+                ]))
+                .style(row_style),
                 Rect::new(detail_content_area.x, y, detail_content_area.width, 1),
             );
         }
@@ -1480,22 +1500,30 @@ fn render_agent_detail(
         }
 
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let row_style = if is_active {
+        let is_selected =
+            matches!(app.mode, Mode::AgentPicker) && index == app.agent_picker_selected;
+        let row_style = if is_selected {
+            Style::default().bg(p.surface0)
+        } else if is_active {
             Style::default().bg(p.surface_dim)
         } else {
             Style::default()
         };
-        let name_style = if is_active {
+        let name_style = if is_selected || is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
         };
-        let status_style = if is_active {
+        let status_style = if is_selected || is_active {
             Style::default().fg(label_color)
         } else {
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
         };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+        let agent_style = if is_selected {
+            Style::default().fg(p.text)
+        } else {
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+        };
         let state_icon = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
 
         for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
@@ -1642,6 +1670,46 @@ mod tests {
         assert!(agent_style.add_modifier.contains(Modifier::DIM));
         assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(agent_style.bg, Some(app.palette.surface_dim));
+    }
+
+    #[test]
+    fn agent_picker_highlight_is_distinct_from_the_active_pane() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        for workspace in &app.workspaces {
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        }
+        app.active = Some(0);
+        app.mode = Mode::AgentPicker;
+        app.agent_picker_selected = 1;
+        app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Workspace]];
+
+        let area = Rect::new(0, 0, 20, 6);
+        let body = agent_panel_body_rect(area, false);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let active_x = find_symbol_x(buffer, body.y, body.width, "o");
+        let selected_x = find_symbol_x(buffer, body.y + 1, body.width, "t");
+        let active_style = buffer[(active_x, body.y)].style();
+        let selected_style = buffer[(selected_x, body.y + 1)].style();
+
+        assert_eq!(active_style.bg, Some(app.palette.surface_dim));
+        assert_eq!(selected_style.bg, Some(app.palette.surface0));
+        assert_eq!(selected_style.fg, Some(app.palette.text));
+        assert!(selected_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            buffer[(body.x + body.width - 1, body.y + 1)].style().bg,
+            Some(app.palette.surface0)
+        );
     }
 
     #[test]
@@ -2130,6 +2198,78 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(detail_area.x, detail_area.y)].symbol(), "1");
         assert_eq!(buffer[(detail_area.x, detail_area.y + 1)].symbol(), "2");
+    }
+
+    #[test]
+    fn collapsed_sidebar_highlights_the_agent_picker_selection() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        for workspace in &app.workspaces {
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        }
+        app.active = Some(0);
+        app.mode = Mode::AgentPicker;
+        app.agent_picker_selected = 1;
+
+        let area = Rect::new(0, 0, 4, 12);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_ne!(
+            buffer[(detail_area.x, detail_area.y)].style().bg,
+            Some(app.palette.surface0)
+        );
+        for x in detail_area.x..detail_area.x + detail_area.width {
+            assert_eq!(
+                buffer[(x, detail_area.y + 1)].style().bg,
+                Some(app.palette.surface0)
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_sidebar_scroll_uses_entry_offset_and_actual_selection_index() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = (1..=6)
+            .map(|idx| Workspace::test_new(&format!("workspace-{idx}")))
+            .collect();
+        app.ensure_test_terminals();
+        for workspace in &app.workspaces {
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        }
+        app.mode = Mode::AgentPicker;
+        app.agent_picker_selected = 5;
+        app.agent_panel_scroll = 2;
+
+        let area = Rect::new(0, 0, 4, 12);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(detail_area.x, detail_area.y)].symbol(), "3");
+        assert_eq!(buffer[(detail_area.x, detail_area.y + 3)].symbol(), "6");
+        for x in detail_area.x..detail_area.x + detail_area.width {
+            assert_eq!(
+                buffer[(x, detail_area.y + 3)].style().bg,
+                Some(app.palette.surface0)
+            );
+        }
     }
 
     #[test]
