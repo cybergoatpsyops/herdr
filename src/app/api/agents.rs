@@ -499,6 +499,16 @@ mod tests {
             panic!("expected agent info response");
         };
         assert_eq!(agent.agent_status, AgentStatus::Idle);
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::PaneAgentStatusChanged {
+                    pane_id,
+                    agent_status: AgentStatus::Idle,
+                    ..
+                } if pane_id == &agent.pane_id
+            )
+        }));
     }
 
     #[test]

@@ -792,6 +792,35 @@ impl App {
         }
     }
 
+    pub(crate) fn focus_pane_for_api(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> bool {
+        let previous_agent_status = self
+            .pane_info(ws_idx, pane_id)
+            .map(|pane| pane.agent_status);
+        let focus_changed = self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return focus_changed;
+        };
+        if previous_agent_status.is_some_and(|status| status != pane.agent_status) {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneAgentStatusChanged,
+                data: crate::api::schema::EventData::PaneAgentStatusChanged {
+                    pane_id: pane.pane_id,
+                    workspace_id: pane.workspace_id,
+                    agent_status: pane.agent_status,
+                    agent: pane.agent,
+                    title: pane.title,
+                    display_agent: pane.display_agent,
+                    state_labels: pane.state_labels,
+                },
+            });
+        }
+        focus_changed
+    }
+
     pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
         // Token updates bypass plugin hooks so a hook cannot refresh its own
         // token and recursively trigger workspace.updated.

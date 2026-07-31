@@ -75,9 +75,7 @@ impl App {
         target: &str,
     ) -> Result<crate::api::schema::AgentInfo, TerminalTargetError> {
         let resolved = self.resolve_agent_target(target)?;
-        self.state
-            .focus_pane_in_workspace(resolved.ws_idx, resolved.pane_id);
-        self.state.mark_active_tab_seen();
+        self.focus_pane_for_api(resolved.ws_idx, resolved.pane_id);
         self.state.settle_terminal_mode_after_focus();
         self.agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| TerminalTargetError::NotFound {

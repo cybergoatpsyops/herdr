@@ -163,8 +163,7 @@ impl App {
             return pane_not_found(id, &target.pane_id);
         };
 
-        self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        self.state.mark_active_tab_seen();
+        self.focus_pane_for_api(ws_idx, pane_id);
         self.state.settle_terminal_mode_after_focus();
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
@@ -3699,6 +3698,16 @@ mod tests {
             panic!("expected pane info response");
         };
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Idle);
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::PaneAgentStatusChanged {
+                    pane_id,
+                    agent_status: crate::api::schema::AgentStatus::Idle,
+                    ..
+                } if pane_id == &pane.pane_id
+            )
+        }));
     }
 
     #[test]

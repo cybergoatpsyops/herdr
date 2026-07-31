@@ -183,7 +183,8 @@ impl App {
                     self.request_repaint();
                 }
                 self.state.outer_terminal_focus = Some(true);
-                self.state.mark_active_tab_seen();
+                // `seen` is ephemeral UI state and is not persisted.
+                let _ = self.state.mark_active_tab_seen();
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusLost => {
