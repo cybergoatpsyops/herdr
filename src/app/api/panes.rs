@@ -166,8 +166,7 @@ impl App {
             return pane_not_found(id, &target.pane_id);
         };
 
-        self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        self.state.mark_active_tab_seen();
+        self.focus_pane_for_api(ws_idx, pane_id);
         self.state.settle_terminal_mode_after_focus();
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
@@ -3679,6 +3678,7 @@ mod tests {
         app.state.outer_terminal_focus = Some(false);
 
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
@@ -3686,6 +3686,11 @@ mod tests {
         app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&sibling)
             .unwrap()
             .seen = false;
         app.state.workspaces[0].tabs[0].layout.focus_pane(pane_id);
@@ -3703,6 +3708,18 @@ mod tests {
             panic!("expected pane info response");
         };
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Idle);
+        assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        assert!(!app.state.workspaces[0].tabs[0].panes[&sibling].seen);
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::PaneAgentStatusChanged {
+                    pane_id,
+                    agent_status: crate::api::schema::AgentStatus::Idle,
+                    ..
+                } if pane_id == &pane.pane_id
+            )
+        }));
     }
 
     #[test]

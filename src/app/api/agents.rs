@@ -33,10 +33,18 @@ impl App {
     }
 
     pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {
+        let resolved = match self.resolve_agent_target(&target.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        let previous_agent_status = self
+            .pane_info(resolved.ws_idx, resolved.pane_id)
+            .map(|pane| pane.agent_status);
         let agent = match self.focus_agent_target(&target.target) {
             Ok(agent) => agent,
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
         };
+        self.emit_focus_status_change(resolved.ws_idx, resolved.pane_id, previous_agent_status);
 
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
@@ -472,6 +480,7 @@ mod tests {
         app.state.outer_terminal_focus = Some(false);
 
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
@@ -483,6 +492,11 @@ mod tests {
         app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&sibling)
             .unwrap()
             .seen = false;
         app.state.workspaces[0].tabs[0].layout.focus_pane(pane_id);
@@ -499,6 +513,18 @@ mod tests {
             panic!("expected agent info response");
         };
         assert_eq!(agent.agent_status, AgentStatus::Idle);
+        assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        assert!(!app.state.workspaces[0].tabs[0].panes[&sibling].seen);
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::PaneAgentStatusChanged {
+                    pane_id,
+                    agent_status: AgentStatus::Idle,
+                    ..
+                } if pane_id == &agent.pane_id
+            )
+        }));
     }
 
     #[test]
