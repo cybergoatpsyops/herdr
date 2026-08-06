@@ -357,8 +357,7 @@ impl App {
             .then_some(PaneFocusDirectionReason::NoNeighbor);
 
         if let Some(target_pane_id) = target {
-            self.state.focus_pane_in_workspace(ws_idx, target_pane_id);
-            self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.focus_pane_for_api(ws_idx, target_pane_id);
             self.state.settle_terminal_mode_after_focus();
         }
         let focused_pane_id = self
@@ -3611,14 +3610,41 @@ mod tests {
     }
 
     #[test]
-    fn api_pane_focus_direction_focuses_neighbor() {
+    fn api_pane_focus_direction_focuses_neighbor_and_emits_done_acknowledgment() {
         let mut app = app_with_linked_worktree();
         let root = app.state.workspaces[0].tabs[0].root_pane;
         let right = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.outer_terminal_focus = Some(false);
         app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&root)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&right)
+            .unwrap()
+            .seen = false;
+        let right_terminal_id = app.state.workspaces[0].tabs[0].panes[&right]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&right_terminal_id)
+            .unwrap()
+            .state = crate::detect::AgentState::Idle;
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 100, 20));
         let root_public = app.public_pane_id(0, root).unwrap();
         let right_public = app.public_pane_id(0, right).unwrap();
+        let workspace_id = app.public_workspace_id(0);
+        assert_eq!(
+            app.pane_info(0, right).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Done
+        );
 
         let response = app.handle_pane_focus_direction(
             "req".into(),
@@ -3638,6 +3664,33 @@ mod tests {
         assert_eq!(focus.focused_pane_id, Some(right_public.clone()));
         assert_eq!(focus.layout.focused_pane_id, right_public);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(right));
+        assert!(app.state.workspaces[0].tabs[0].panes[&right].seen);
+        assert!(!app.state.workspaces[0].tabs[0].panes[&root].seen);
+        assert_eq!(
+            app.pane_info(0, right).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Idle
+        );
+        let status_events = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .filter(|(_, event)| {
+                matches!(
+                    &event.data,
+                    crate::api::schema::EventData::PaneAgentStatusChanged { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(status_events.len(), 1);
+        assert!(matches!(
+            &status_events[0].1.data,
+            crate::api::schema::EventData::PaneAgentStatusChanged {
+                pane_id,
+                workspace_id: event_workspace_id,
+                agent_status: crate::api::schema::AgentStatus::Idle,
+                ..
+            } if pane_id == &right_public && event_workspace_id == &workspace_id
+        ));
     }
 
     #[test]

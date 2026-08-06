@@ -75,10 +75,17 @@ impl App {
         let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
             return workspace_not_found(id, &target.workspace_id);
         };
-        if self.state.workspaces.get(index).is_none() {
+        let Some(workspace) = self.state.workspaces.get(index) else {
             return workspace_not_found(id, &target.workspace_id);
-        }
+        };
+        let focused_pane_id = workspace.focused_pane_id();
+        let previous_agent_status = focused_pane_id
+            .and_then(|pane_id| self.pane_info(index, pane_id))
+            .map(|pane| pane.agent_status);
         self.state.switch_workspace(index);
+        if let Some(focused_pane_id) = focused_pane_id {
+            self.emit_focus_status_change(index, focused_pane_id, previous_agent_status);
+        }
 
         encode_success(
             id,
@@ -352,6 +359,95 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+
+    #[test]
+    fn api_workspace_focus_emits_done_acknowledgment_for_exact_focused_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let source = Workspace::test_new("source");
+        let unrelated = source.tabs[0].root_pane;
+        let mut target = Workspace::test_new("target");
+        let target_pane = target.tabs[0].root_pane;
+        let sibling = target.test_split(ratatui::layout::Direction::Horizontal);
+        target.tabs[0].layout.focus_pane(target_pane);
+        app.state.workspaces = vec![source, target];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.outer_terminal_focus = Some(false);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&unrelated)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&target_pane)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&sibling)
+            .unwrap()
+            .seen = false;
+        let target_terminal_id = app.state.workspaces[1].tabs[0].panes[&target_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&target_terminal_id)
+            .unwrap()
+            .state = crate::detect::AgentState::Idle;
+        let workspace_id = app.public_workspace_id(1);
+        let target_public_id = app.public_pane_id(1, target_pane).unwrap();
+        assert_eq!(
+            app.pane_info(1, target_pane).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Done
+        );
+
+        let response = app.handle_workspace_focus(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceInfo { workspace } = success.result else {
+            panic!("expected workspace info");
+        };
+        assert_eq!(workspace.workspace_id, workspace_id);
+        assert_eq!(app.state.active, Some(1));
+        assert!(app.state.workspaces[1].tabs[0].panes[&target_pane].seen);
+        assert!(!app.state.workspaces[1].tabs[0].panes[&sibling].seen);
+        assert!(!app.state.workspaces[0].tabs[0].panes[&unrelated].seen);
+        assert_eq!(
+            app.pane_info(1, target_pane).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Idle
+        );
+        let status_events = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .filter(|(_, event)| matches!(&event.data, EventData::PaneAgentStatusChanged { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(status_events.len(), 1);
+        assert!(matches!(
+            &status_events[0].1.data,
+            EventData::PaneAgentStatusChanged {
+                pane_id,
+                workspace_id: event_workspace_id,
+                agent_status: crate::api::schema::AgentStatus::Idle,
+                ..
+            } if pane_id == &target_public_id && event_workspace_id == &workspace_id
+        ));
+    }
 
     // `new_cwd = follow` must anchor on the focused pane for every creation
     // surface. Splits and tabs already do; a new workspace must follow the
