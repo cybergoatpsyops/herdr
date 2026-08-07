@@ -266,7 +266,10 @@ impl App {
 
     pub(crate) fn host_keyboard_report_all_requested(&self) -> bool {
         if self.state.popup_pane.is_none()
-            && matches!(self.state.mode, Mode::Prefix | Mode::Navigate)
+            && matches!(
+                self.state.mode,
+                Mode::Prefix | Mode::Navigate | Mode::AgentPicker
+            )
         {
             return true;
         }
@@ -544,6 +547,14 @@ mod tests {
                 warnings: Vec::new(),
             },
         )]);
+    }
+
+    #[test]
+    fn agent_picker_requests_host_report_all_keyboard_events() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::AgentPicker;
+
+        assert!(app.host_keyboard_report_all_requested());
     }
 
     #[tokio::test]

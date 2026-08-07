@@ -527,11 +527,13 @@ fn render_mobile_switcher_content(
             );
             doc_y += 1;
         }
-        for entry in &entries {
+        for (entry_idx, entry) in entries.iter().enumerate() {
             let active = focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
                 entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
             });
-            let bg = mobile_item_bg(false, active, p);
+            let selected = matches!(app.mode, crate::app::state::Mode::AgentPicker)
+                && entry_idx == app.agent_picker_selected;
+            let bg = mobile_item_bg(selected, active, p);
             let (icon, icon_style) = state_dot(entry.state, entry.seen, p);
             let title = Line::from(vec![
                 Span::styled("  ", Style::default().bg(bg)),
@@ -1384,6 +1386,52 @@ mod tests {
         let entry = agent_entry(None, Some("pi"));
 
         assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
+    }
+
+    #[test]
+    fn mobile_agent_picker_highlights_scrolled_selection_by_entry_index() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = (0..6)
+            .map(|idx| crate::workspace::Workspace::test_new(&format!("agent-{idx}")))
+            .collect();
+        app.ensure_test_terminals();
+        for workspace in &app.workspaces {
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent =
+                Some(crate::detect::Agent::Pi);
+        }
+        app.active = Some(0);
+        app.mode = crate::app::state::Mode::AgentPicker;
+        app.agent_picker_selected = 5;
+        app.mobile_switcher_scroll = 6;
+
+        let viewport = Rect::new(0, 0, 40, 7);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+            viewport.width,
+            viewport.height,
+        ))
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_switcher_content(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    viewport,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(1, 4)].style().bg, Some(app.palette.panel_bg));
+        for y in 5..=6 {
+            for x in 1..viewport.width {
+                assert_eq!(buffer[(x, y)].style().bg, Some(app.palette.surface0));
+            }
+        }
     }
 
     #[test]

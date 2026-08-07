@@ -569,6 +569,8 @@ impl App {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            agent_picker_selected: 0,
+            agent_picker_target: None,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
@@ -1800,6 +1802,9 @@ impl App {
             }
             Mode::Navigate => {
                 self.handle_navigate_key(key);
+            }
+            Mode::AgentPicker => {
+                self.handle_agent_picker_key(key);
             }
             Mode::Copy => {
                 self.handle_copy_mode_key(key);
