@@ -1,7 +1,8 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
-    text::Span,
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
     Frame,
 };
 
@@ -339,7 +340,7 @@ fn compute_mobile_view(
         (area, Rect::default())
     };
 
-    if app.mode == Mode::Navigate {
+    if matches!(app.mode, Mode::Navigate | Mode::AgentPicker) {
         let switcher_viewport_h = area.height.saturating_sub(header_h + 1);
         let max_scroll = mobile_switcher_max_scroll_for_height(app, switcher_viewport_h);
         app.mobile_switcher_scroll = app.mobile_switcher_scroll.min(max_scroll);
@@ -432,10 +433,11 @@ pub fn render_with_runtime_registry(
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
         Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
-        Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
+        Mode::Navigate | Mode::AgentPicker if app.view.layout == ViewLayout::Mobile => {
             render_mobile_panel(app, terminal_runtimes, frame, frame.area())
         }
         Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
+        Mode::AgentPicker => render_agent_picker_overlay(app, frame, mode_bar_area),
         Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
         Mode::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
         Mode::Resize => render_resize_overlay(app, frame, mode_bar_area),
@@ -579,7 +581,46 @@ fn dim_background(frame: &mut Frame, area: Rect) {
     }
 }
 
-/// Floating overlay for navigate mode — appears at bottom of terminal area.
+/// Floating overlay for agent picker mode — appears at bottom of terminal area.
+fn render_agent_picker_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    let key = Style::default()
+        .fg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(app.palette.overlay0);
+    let mode_style = Style::default()
+        .fg(self::widgets::panel_contrast_fg(&app.palette))
+        .bg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+
+    let entries = agent_panel_entries(app);
+    let empty_message = entries.is_empty().then(|| {
+        if all_agent_panel_entries(app).is_empty() {
+            "no agents"
+        } else {
+            "no matching agents"
+        }
+    });
+
+    let mut spans = vec![Span::styled(" AGENTS ", mode_style)];
+    if let Some(message) = empty_message {
+        spans.push(Span::styled(format!("  {message}"), dim));
+    }
+    spans.extend(_build_hints(
+        &[("j/k ↑/↓", "move"), ("enter", "focus"), ("esc", "cancel")],
+        key,
+        dim,
+    ));
+
+    let overlay_y = area.y + area.height.saturating_sub(1);
+    let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);
+    frame.render_widget(Clear, overlay_area);
+    let buf = frame.buffer_mut();
+    for x in overlay_area.x..overlay_area.x + overlay_area.width {
+        buf[(x, overlay_area.y)].set_style(Style::default().bg(app.palette.panel_bg));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), overlay_area);
+}
+
 fn _build_hints(items: &[(&str, &str)], key_style: Style, dim_style: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     spans.push(Span::raw(" "));
@@ -1402,6 +1443,67 @@ mod tests {
         )
         .expect("write HEAD");
         root
+    }
+
+    fn render_agent_picker_row(app: &AppState) -> String {
+        let area = Rect::new(0, 0, 80, 4);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_agent_picker_overlay(app, frame, area))
+            .unwrap();
+        buffer_row_text(terminal.backend().buffer(), area, area.height - 1)
+    }
+
+    fn app_with_agent() -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent =
+            Some(crate::detect::Agent::Pi);
+        app
+    }
+
+    #[test]
+    fn agent_picker_overlay_renders_truthful_controls() {
+        let row = render_agent_picker_row(&app_with_agent());
+
+        assert!(row.contains("AGENTS"), "{row}");
+        assert!(row.contains("j/k ↑/↓ move"), "{row}");
+        assert!(row.contains("enter focus"), "{row}");
+        assert!(row.contains("esc cancel"), "{row}");
+        assert!(!row.contains("NAVIGATE"), "{row}");
+    }
+
+    #[test]
+    fn agent_picker_overlay_reports_no_agents() {
+        let row = render_agent_picker_row(&AppState::test_new());
+
+        assert!(row.contains("no agents"), "{row}");
+        assert!(!row.contains("no matching agents"), "{row}");
+    }
+
+    #[test]
+    fn agent_picker_overlay_reports_no_matching_agents() {
+        let mut app = app_with_agent();
+        app.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "ui-test".to_string(),
+            label: Some("missing".to_string()),
+            filter: Some(crate::api::schema::AgentViewFilter::Eq {
+                field: crate::api::schema::AgentViewField::Builtin(
+                    crate::api::schema::AgentViewBuiltinField::WorkspaceId,
+                ),
+                value: crate::api::schema::AgentViewValue::String("missing".to_string()),
+            }),
+            sort: Vec::new(),
+        });
+
+        let row = render_agent_picker_row(&app);
+
+        assert!(row.contains("no matching agents"), "{row}");
     }
 
     #[test]

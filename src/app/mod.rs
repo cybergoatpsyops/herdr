@@ -586,6 +586,8 @@ impl App {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            agent_picker_selected: 0,
+            agent_picker_target: None,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
@@ -1900,6 +1902,9 @@ impl App {
             }
             Mode::Navigate => {
                 self.handle_navigate_key(key);
+            }
+            Mode::AgentPicker => {
+                self.handle_agent_picker_key(key);
             }
             Mode::Copy => {
                 self.handle_copy_mode_key(key);
@@ -3722,7 +3727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outer_focus_gained_marks_visible_done_panes_seen() {
+    async fn outer_focus_gained_acknowledges_only_focused_done_pane() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("test");
         let root_pane = workspace.tabs[0].root_pane;
@@ -3772,6 +3777,7 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.outer_terminal_focus = Some(false);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(split_pane));
 
         let handled = app
             .handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
@@ -3779,8 +3785,9 @@ mod tests {
 
         assert!(handled);
         assert_eq!(app.state.outer_terminal_focus, Some(true));
-        assert!(app.state.workspaces[0].tabs[0].panes[&root_pane].seen);
+        // Exact-pane acknowledgment: only the focused completed pane is marked seen.
         assert!(app.state.workspaces[0].tabs[0].panes[&split_pane].seen);
+        assert!(!app.state.workspaces[0].tabs[0].panes[&root_pane].seen);
         assert!(!app.state.workspaces[0].tabs[background_tab].panes[&background_pane].seen);
     }
 

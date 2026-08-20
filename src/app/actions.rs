@@ -328,19 +328,24 @@ impl AppState {
             pane_id,
         };
         if previous.as_ref() == Some(&target) {
+            // `seen` is ephemeral UI state and is not persisted.
+            let _ = self.mark_pane_seen(ws_idx, pane_id);
             return false;
         }
 
         if self.copy_mode.is_some() {
             self.clear_copy_mode_selection();
         }
-        self.switch_workspace_tab(ws_idx, tab_idx);
+        self.switch_workspace_tab_without_ack(ws_idx, tab_idx);
         if let Some(tab) = self
             .workspaces
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
         {
             tab.layout.focus_pane(pane_id);
+            if let Some(pane) = tab.panes.get_mut(&pane_id) {
+                pane.seen = true;
+            }
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             self.sync_copy_mode_with_focus();
@@ -1134,6 +1139,7 @@ impl AppState {
                     public_tab_id_for_index(ws, active_tab).unwrap_or_else(|| workspace_id.clone());
                 crate::logging::tab_focused(&workspace_id, &tab_id);
             }
+            self.mark_active_tab_seen();
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
             self.record_pane_focus_after_navigation(previous_focus);
@@ -1142,6 +1148,14 @@ impl AppState {
     }
 
     pub(crate) fn switch_workspace_tab(&mut self, ws_idx: usize, tab_idx: usize) -> bool {
+        if !self.switch_workspace_tab_without_ack(ws_idx, tab_idx) {
+            return false;
+        }
+        self.mark_active_tab_seen();
+        true
+    }
+
+    fn switch_workspace_tab_without_ack(&mut self, ws_idx: usize, tab_idx: usize) -> bool {
         if ws_idx >= self.workspaces.len() {
             return false;
         }
@@ -1237,12 +1251,32 @@ impl AppState {
     }
 
     fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
+        let row_range = crate::ui::mobile_switcher_workspace_doc_range(self, idx);
+        self.ensure_mobile_switcher_doc_range_visible(row_range);
+    }
+
+    fn mobile_switcher_agent_doc_range(&self, idx: usize) -> Option<std::ops::Range<usize>> {
+        (idx < crate::ui::agent_panel_entries(self).len()).then(|| {
+            // Agents lead the mobile document: one title row, then two rows for
+            // each entry in the current filtered agent list.
+            let start = 1 + idx * 2;
+            start..start + 2
+        })
+    }
+
+    fn ensure_mobile_agent_visible(&mut self, idx: usize) {
+        let Some(row_range) = self.mobile_switcher_agent_doc_range(idx) else {
+            return;
+        };
+        self.ensure_mobile_switcher_doc_range_visible(row_range);
+    }
+
+    fn ensure_mobile_switcher_doc_range_visible(&mut self, row_range: std::ops::Range<usize>) {
         let viewport = crate::ui::mobile_switcher_areas(self).viewport;
         if viewport.height == 0 {
             return;
         }
 
-        let row_range = crate::ui::mobile_switcher_workspace_doc_range(self, idx);
         let visible_start = self.mobile_switcher_scroll;
         let visible_end = visible_start.saturating_add(viewport.height as usize);
         if row_range.start < visible_start {
@@ -1266,6 +1300,7 @@ impl AppState {
             let workspace_id = ws.id.clone();
             let tab_id = public_tab_id_for_index(ws, idx).unwrap_or_else(|| workspace_id.clone());
             crate::logging::tab_focused(&workspace_id, &tab_id);
+            self.mark_active_tab_seen();
             self.mark_session_dirty();
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
@@ -1278,22 +1313,30 @@ impl AppState {
         let Some(ws_idx) = self.active else {
             return false;
         };
-        let Some(tab) = self
+        let Some(pane_id) = self
             .workspaces
-            .get_mut(ws_idx)
-            .and_then(crate::workspace::Workspace::active_tab_mut)
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id)
         else {
             return false;
         };
+        self.mark_pane_seen(ws_idx, pane_id)
+    }
 
-        let mut changed = false;
-        for pane in tab.panes.values_mut() {
-            if !pane.seen {
-                pane.seen = true;
-                changed = true;
-            }
+    fn mark_pane_seen(&mut self, ws_idx: usize, pane_id: PaneId) -> bool {
+        let Some(pane) = self.workspaces.get_mut(ws_idx).and_then(|workspace| {
+            workspace
+                .tabs
+                .iter_mut()
+                .find_map(|tab| tab.panes.get_mut(&pane_id))
+        }) else {
+            return false;
+        };
+        if pane.seen {
+            return false;
         }
-        changed
+        pane.seen = true;
+        true
     }
 
     pub(crate) fn visible_workspace_order(&self) -> Vec<usize> {
@@ -1521,18 +1564,20 @@ impl AppState {
         };
         let ws_idx = target.ws_idx;
         let pane_id = target.pane_id;
+        let already_focused = self.current_pane_focus_target().is_some_and(|current| {
+            self.workspaces
+                .get(ws_idx)
+                .is_some_and(|ws| current.workspace_id == ws.id && current.pane_id == pane_id)
+        });
 
-        if self.active == Some(ws_idx) && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
-        {
-            self.ensure_agent_panel_entry_visible(idx);
-            return true;
+        // Already-focused targets still go through focus_pane_in_workspace so
+        // acknowledgement side effects run, but success is true either way.
+        let focused = self.focus_pane_in_workspace(ws_idx, pane_id);
+        if !(already_focused || focused) {
+            return false;
         }
-
-        if self.focus_pane_in_workspace(ws_idx, pane_id) {
-            self.ensure_agent_panel_entry_visible(idx);
-            return true;
-        }
-        false
+        self.ensure_agent_panel_entry_visible(idx);
+        true
     }
 
     #[cfg(test)]
@@ -1560,7 +1605,32 @@ impl AppState {
     }
 
     pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
+        if self.view.layout == ViewLayout::Mobile && self.mode == Mode::AgentPicker {
+            self.ensure_mobile_agent_visible(idx);
+            return;
+        }
+
         if self.sidebar_collapsed {
+            let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+            let visible_rows = detail_area.height.saturating_sub(1) as usize;
+            if visible_rows == 0 {
+                return;
+            }
+
+            let entry_count = crate::ui::agent_panel_entries(self).len();
+            let max_scroll = entry_count.saturating_sub(visible_rows);
+            self.agent_panel_scroll = self.agent_panel_scroll.min(max_scroll);
+            if idx >= entry_count {
+                return;
+            }
+
+            let visible_end = self.agent_panel_scroll.saturating_add(visible_rows);
+            if idx < self.agent_panel_scroll {
+                self.agent_panel_scroll = idx;
+            } else if idx >= visible_end {
+                self.agent_panel_scroll = idx.saturating_add(1).saturating_sub(visible_rows);
+            }
+            self.agent_panel_scroll = self.agent_panel_scroll.min(max_scroll);
             return;
         }
 
@@ -1893,26 +1963,16 @@ impl AppState {
         let Some(target) = self.previous_pane_focus.clone() else {
             return;
         };
-        let Some((ws_idx, tab_idx)) = self.pane_focus_target_indices(&target) else {
+        let Some((ws_idx, _tab_idx)) = self.pane_focus_target_indices(&target) else {
             self.previous_pane_focus = None;
             return;
         };
-        let current = self.current_pane_focus_target();
-        if current.as_ref() == Some(&target) {
+        if self.current_pane_focus_target().as_ref() == Some(&target) {
             self.previous_pane_focus = None;
             return;
         }
 
-        self.switch_workspace_tab(ws_idx, tab_idx);
-        if let Some(tab) = self
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|ws| ws.tabs.get_mut(tab_idx))
-        {
-            tab.layout.focus_pane(target.pane_id);
-            self.previous_pane_focus = current;
-            self.mark_session_dirty();
-        }
+        self.focus_pane_in_workspace(ws_idx, target.pane_id);
     }
 
     pub(crate) fn apply_pane_zoom(
@@ -3099,9 +3159,9 @@ impl AppState {
         change: &EffectiveStateChange,
         suppress_completion: bool,
     ) -> Option<bool> {
-        let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
-        let suppress_active_tab_notifications =
-            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
+        let pane_has_focus = self.active == Some(ws_idx)
+            && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id);
+        let acknowledge_completion = pane_has_focus && self.outer_terminal_focus != Some(false);
         let pane = self.workspaces[ws_idx]
             .tabs
             .iter_mut()
@@ -3110,7 +3170,7 @@ impl AppState {
         if change.state != AgentState::Idle {
             pane.seen = true;
         } else if !suppress_completion && is_completion_transition(change) {
-            pane.seen = suppress_active_tab_notifications;
+            pane.seen = acknowledge_completion;
         }
         let seen = pane.seen;
 
@@ -4311,11 +4371,25 @@ mod tests {
     fn focus_agent_entry_succeeds_for_already_focused_agent() {
         let mut state = app_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
+        let sibling = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].tabs[0].layout.focus_pane(root);
         mark_agent(&mut state, 0, 0, root);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&root)
+            .unwrap()
+            .seen = false;
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&sibling)
+            .unwrap()
+            .seen = false;
 
         assert!(state.focus_agent_entry(0));
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        assert!(state.workspaces[0].tabs[0].panes[&root].seen);
+        assert!(!state.workspaces[0].tabs[0].panes[&sibling].seen);
         state.assert_invariants_for_test();
     }
 
@@ -4372,6 +4446,71 @@ mod tests {
     }
 
     #[test]
+    fn exact_pane_focus_acknowledges_only_the_target() {
+        let mut workspace = Workspace::test_new("one");
+        let root = workspace.tabs[0].root_pane;
+        let split = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(root);
+        workspace.tabs[0].panes.get_mut(&root).unwrap().seen = false;
+        workspace.tabs[0].panes.get_mut(&split).unwrap().seen = false;
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+
+        assert!(state.focus_pane_in_workspace(0, split));
+        assert!(!state.workspaces[0].tabs[0].panes[&root].seen);
+        assert!(state.workspaces[0].tabs[0].panes[&split].seen);
+    }
+
+    #[test]
+    fn exact_already_focused_pane_can_be_acknowledged() {
+        let mut state = app_with_workspaces(&["one"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+        state.session_dirty = false;
+
+        assert!(!state.focus_pane_in_workspace(0, pane_id));
+        assert!(state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        assert!(!state.session_dirty);
+    }
+
+    #[test]
+    fn tab_activation_acknowledges_only_its_focused_pane() {
+        let mut workspace = Workspace::test_new("one");
+        let target_tab = workspace.test_add_tab(Some("target"));
+        workspace.switch_tab(target_tab);
+        let target = workspace.tabs[target_tab].root_pane;
+        let sibling = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[target_tab].layout.focus_pane(target);
+        workspace.tabs[target_tab]
+            .panes
+            .get_mut(&target)
+            .unwrap()
+            .seen = false;
+        workspace.tabs[target_tab]
+            .panes
+            .get_mut(&sibling)
+            .unwrap()
+            .seen = false;
+        workspace.switch_tab(0);
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+
+        assert!(state.switch_workspace_tab(0, target_tab));
+        assert!(state.workspaces[0].tabs[target_tab].panes[&target].seen);
+        assert!(!state.workspaces[0].tabs[target_tab].panes[&sibling].seen);
+    }
+
+    #[test]
     fn previous_agent_keeps_wrapped_target_visible_in_agent_panel() {
         let mut workspace = Workspace::test_new("one");
         let root = workspace.tabs[0].root_pane;
@@ -4401,6 +4540,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_picker_keeps_mobile_agent_rows_visible() {
+        let mut state = app_with_workspaces(&["a", "b", "c", "d", "e", "f"]);
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            mark_agent(&mut state, ws_idx, 0, pane_id);
+        }
+        state.mode = Mode::AgentPicker;
+        state.view.layout = ViewLayout::Mobile;
+        state.view.mobile_header_rect = ratatui::layout::Rect::new(0, 0, 40, 2);
+        state.view.terminal_area = ratatui::layout::Rect::new(0, 2, 40, 8);
+
+        state.ensure_agent_panel_entry_visible(5);
+
+        // Seven viewport rows contain the selected agent's two-row range only
+        // after scrolling the document down to row six.
+        assert_eq!(state.mobile_switcher_scroll, 6);
+        assert_eq!(state.agent_panel_scroll, 0);
+
+        state.ensure_agent_panel_entry_visible(0);
+        assert_eq!(state.mobile_switcher_scroll, 1);
+    }
+
+    #[test]
+    fn agent_picker_keeps_collapsed_sidebar_entry_visible() {
+        let mut state = app_with_workspaces(&["a", "b", "c", "d", "e", "f"]);
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            mark_agent(&mut state, ws_idx, 0, pane_id);
+        }
+        state.mode = Mode::AgentPicker;
+        state.sidebar_collapsed = true;
+        state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 4, 12);
+
+        state.ensure_agent_panel_entry_visible(5);
+
+        // The collapsed detail section has four usable rows, so the sixth
+        // entry is visible when the entry offset starts at two.
+        assert_eq!(state.agent_panel_scroll, 2);
+
+        state.ensure_agent_panel_entry_visible(1);
+        assert_eq!(state.agent_panel_scroll, 1);
+    }
+
+    #[test]
     fn switch_workspace_updates_active_and_selected() {
         let mut state = app_with_workspaces(&["a", "b", "c"]);
         state.switch_workspace(2);
@@ -4416,9 +4599,15 @@ mod tests {
 
         state.focus_pane_in_workspace(0, root);
         state.focus_pane_in_workspace(0, right);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&root)
+            .unwrap()
+            .seen = false;
         state.last_pane();
 
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        assert!(state.workspaces[0].tabs[0].panes[&root].seen);
 
         state.last_pane();
 
@@ -4943,6 +5132,76 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Idle);
         let pane = state.workspaces[0].panes.get(&pane_id).unwrap();
         assert!(pane.seen);
+    }
+
+    #[test]
+    fn outer_focus_none_focused_pane_completion_is_acknowledged() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = None;
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+        state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Idle);
+        let pane = state.workspaces[0].panes.get(&pane_id).unwrap();
+        assert!(pane.seen);
+    }
+
+    #[test]
+    fn visible_unfocused_completion_stays_unseen_without_notification_drift() {
+        let mut workspace = Workspace::test_new("active");
+        let focused_pane = workspace.tabs[0].root_pane;
+        let unfocused_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(focused_pane);
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.outer_terminal_focus = Some(true);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        let terminal_id = state.workspaces[0].tabs[0].panes[&unfocused_pane]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Working;
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&unfocused_pane)
+            .unwrap()
+            .seen = true;
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: unfocused_pane,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert!(!state.workspaces[0].tabs[0].panes[&unfocused_pane].seen);
+        assert!(state.toast.is_none());
     }
 
     #[test]

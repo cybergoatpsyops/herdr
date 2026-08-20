@@ -133,7 +133,20 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
             return tab_not_found(id, &target.tab_id);
         };
+        let Some(focused_pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .map(|tab| tab.layout.focused())
+        else {
+            return tab_not_found(id, &target.tab_id);
+        };
+        let previous_agent_status = self
+            .pane_info(ws_idx, focused_pane_id)
+            .map(|pane| pane.agent_status);
         self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.emit_focus_status_change(ws_idx, focused_pane_id, previous_agent_status);
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
 
         encode_success(id, ResponseResult::TabInfo { tab })
@@ -332,6 +345,99 @@ mod tests {
         config::{Config, ShellModeConfig},
         workspace::Workspace,
     };
+
+    #[test]
+    fn api_tab_focus_emits_done_acknowledgment_for_exact_focused_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("tabs");
+        let target_tab_idx = workspace.test_add_tab(Some("target"));
+        workspace.switch_tab(target_tab_idx);
+        let target_pane = workspace.tabs[target_tab_idx].root_pane;
+        let sibling = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[target_tab_idx]
+            .layout
+            .focus_pane(target_pane);
+        workspace.switch_tab(0);
+        let unrelated = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.outer_terminal_focus = Some(false);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[target_tab_idx]
+            .panes
+            .get_mut(&target_pane)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[0].tabs[target_tab_idx]
+            .panes
+            .get_mut(&sibling)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&unrelated)
+            .unwrap()
+            .seen = false;
+        let target_terminal_id = app.state.workspaces[0].tabs[target_tab_idx].panes[&target_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&target_terminal_id)
+            .unwrap()
+            .state = crate::detect::AgentState::Idle;
+        let tab_id = app.public_tab_id(0, target_tab_idx).unwrap();
+        let target_public_id = app.public_pane_id(0, target_pane).unwrap();
+        let workspace_id = app.public_workspace_id(0);
+        assert_eq!(
+            app.pane_info(0, target_pane).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Done
+        );
+
+        let response = app.handle_tab_focus(
+            "req".into(),
+            TabTarget {
+                tab_id: tab_id.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::TabInfo { tab } = success.result else {
+            panic!("expected tab info");
+        };
+        assert_eq!(tab.tab_id, tab_id);
+        assert!(app.state.workspaces[0].tabs[target_tab_idx].panes[&target_pane].seen);
+        assert!(!app.state.workspaces[0].tabs[target_tab_idx].panes[&sibling].seen);
+        assert!(!app.state.workspaces[0].tabs[0].panes[&unrelated].seen);
+        assert_eq!(
+            app.pane_info(0, target_pane).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Idle
+        );
+        let status_events = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .filter(|(_, event)| matches!(&event.data, EventData::PaneAgentStatusChanged { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(status_events.len(), 1);
+        assert!(matches!(
+            &status_events[0].1.data,
+            EventData::PaneAgentStatusChanged {
+                pane_id,
+                workspace_id: event_workspace_id,
+                agent_status: crate::api::schema::AgentStatus::Idle,
+                ..
+            } if pane_id == &target_public_id && event_workspace_id == &workspace_id
+        ));
+    }
 
     #[test]
     fn api_tab_close_last_tab_closes_workspace_and_emits_both_events() {
