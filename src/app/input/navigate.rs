@@ -180,6 +180,29 @@ impl App {
         }
     }
 
+    pub(crate) fn handle_agent_picker_key(&mut self, raw_key: TerminalKey) {
+        self.state.update_dismissed = true;
+
+        match agent_picker_action_for_key(&self.state, raw_key) {
+            Some(AgentPickerAction::Cancel) => close_agent_picker(&mut self.state),
+            Some(AgentPickerAction::Previous) => {
+                move_agent_picker_selection(&mut self.state, false)
+            }
+            Some(AgentPickerAction::Next) => move_agent_picker_selection(&mut self.state, true),
+            Some(AgentPickerAction::Confirm) => {
+                let entries = crate::ui::agent_panel_entries(&self.state);
+                if let Some((idx, ws_idx, pane_id)) =
+                    resolve_agent_picker_target(&self.state, &entries)
+                {
+                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                    self.state.ensure_agent_panel_entry_visible(idx);
+                }
+                close_agent_picker(&mut self.state);
+            }
+            None => {}
+        }
+    }
+
     pub(super) fn execute_tui_navigate_action(
         &mut self,
         action: NavigateAction,
@@ -260,6 +283,7 @@ impl App {
                 self.state.mobile_switcher_scroll = 0;
                 self.state.mode = Mode::Navigate;
             }
+            NavigateAction::AgentPicker => open_agent_picker(&mut self.state),
             NavigateAction::PreviousWorkspace => {
                 if let Some(ws_idx) = self.relative_visible_workspace(-1) {
                     self.focus_workspace_idx_via_api(ws_idx);
@@ -1353,6 +1377,143 @@ pub(super) fn api_pane_direction(direction: NavDirection) -> crate::api::schema:
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentPickerAction {
+    Cancel,
+    Previous,
+    Next,
+    Confirm,
+}
+
+fn agent_picker_action_for_key(
+    state: &AppState,
+    raw_key: TerminalKey,
+) -> Option<AgentPickerAction> {
+    let key = raw_key.as_key_event();
+    if key.code == KeyCode::Esc || state.is_prefix_key(&raw_key) {
+        return Some(AgentPickerAction::Cancel);
+    }
+
+    let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+    if !modifiers.is_empty() {
+        return None;
+    }
+
+    match code {
+        KeyCode::Char('k') | KeyCode::Up => Some(AgentPickerAction::Previous),
+        KeyCode::Char('j') | KeyCode::Down => Some(AgentPickerAction::Next),
+        KeyCode::Enter => Some(AgentPickerAction::Confirm),
+        _ => None,
+    }
+}
+
+fn open_agent_picker(state: &mut AppState) {
+    let entries = crate::ui::agent_panel_entries(state);
+    if entries.is_empty() {
+        state.agent_picker_selected = 0;
+        state.agent_picker_target = None;
+        return;
+    }
+
+    let focused = state.active.and_then(|ws_idx| {
+        state
+            .workspaces
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id)
+            .map(|pane_id| (ws_idx, pane_id))
+    });
+    let selected = entries
+        .iter()
+        .position(|entry| Some((entry.ws_idx, entry.pane_id)) == focused)
+        .unwrap_or(0);
+    set_agent_picker_selection(state, &entries, selected);
+    state.mode = Mode::AgentPicker;
+    state.ensure_agent_panel_entry_visible(selected);
+}
+
+fn agent_picker_target_at(
+    state: &AppState,
+    entries: &[crate::ui::AgentPanelEntry],
+    idx: usize,
+) -> Option<crate::app::state::PaneFocusTarget> {
+    let entry = entries.get(idx)?;
+    let workspace_id = state.workspaces.get(entry.ws_idx)?.id.clone();
+    Some(crate::app::state::PaneFocusTarget {
+        workspace_id,
+        pane_id: entry.pane_id,
+    })
+}
+
+fn resolve_agent_picker_target(
+    state: &AppState,
+    entries: &[crate::ui::AgentPanelEntry],
+) -> Option<(usize, usize, crate::layout::PaneId)> {
+    let target = state.agent_picker_target.as_ref()?;
+    entries.iter().enumerate().find_map(|(idx, entry)| {
+        let workspace = state.workspaces.get(entry.ws_idx)?;
+        (workspace.id == target.workspace_id && entry.pane_id == target.pane_id).then_some((
+            idx,
+            entry.ws_idx,
+            entry.pane_id,
+        ))
+    })
+}
+
+fn set_agent_picker_selection(
+    state: &mut AppState,
+    entries: &[crate::ui::AgentPanelEntry],
+    idx: usize,
+) {
+    state.agent_picker_selected = idx;
+    state.agent_picker_target = agent_picker_target_at(state, entries, idx);
+}
+
+fn bounded_agent_picker_selection(current: usize, entry_count: usize, forward: bool) -> usize {
+    if forward {
+        current.saturating_add(1).min(entry_count - 1)
+    } else {
+        current.saturating_sub(1)
+    }
+}
+
+fn move_agent_picker_selection(state: &mut AppState, forward: bool) {
+    let entries = crate::ui::agent_panel_entries(state);
+    if entries.is_empty() {
+        state.agent_picker_selected = 0;
+        state.agent_picker_target = None;
+        return;
+    }
+
+    let selected = resolve_agent_picker_target(state, &entries)
+        .map(|(idx, _, _)| bounded_agent_picker_selection(idx, entries.len(), forward))
+        .unwrap_or(0);
+    set_agent_picker_selection(state, &entries, selected);
+    state.ensure_agent_panel_entry_visible(selected);
+}
+
+fn close_agent_picker(state: &mut AppState) {
+    state.mode = Mode::Terminal;
+    state.agent_picker_target = None;
+}
+
+#[cfg(test)]
+pub(super) fn handle_agent_picker_key(state: &mut AppState, key: KeyEvent) {
+    state.update_dismissed = true;
+    match agent_picker_action_for_key(state, TerminalKey::from(key)) {
+        Some(AgentPickerAction::Cancel) => close_agent_picker(state),
+        Some(AgentPickerAction::Previous) => move_agent_picker_selection(state, false),
+        Some(AgentPickerAction::Next) => move_agent_picker_selection(state, true),
+        Some(AgentPickerAction::Confirm) => {
+            let entries = crate::ui::agent_panel_entries(state);
+            if let Some((idx, _, _)) = resolve_agent_picker_target(state, &entries) {
+                state.focus_agent_entry(idx);
+            }
+            close_agent_picker(state);
+        }
+        None => {}
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     let mut terminal_runtimes = TerminalRuntimeRegistry::new();
@@ -1390,6 +1551,7 @@ pub(crate) enum NavigateAction {
     SwitchTab(usize),
     FocusAgent(usize),
     WorkspacePicker,
+    AgentPicker,
     PreviousWorkspace,
     NextWorkspace,
     PreviousAgent,
@@ -1531,6 +1693,7 @@ fn non_indexed_action_for_key(
         (&kb.help, NavigateAction::Help),
         (&kb.settings, NavigateAction::Settings),
         (&kb.workspace_picker, NavigateAction::WorkspacePicker),
+        (&kb.agent_picker, NavigateAction::AgentPicker),
         (&kb.new_workspace, NavigateAction::NewWorkspace),
         (&kb.new_worktree, NavigateAction::NewWorktree),
         (&kb.open_worktree, NavigateAction::OpenWorktree),
@@ -1713,6 +1876,7 @@ pub(super) fn execute_navigate_action_in_context(
             state.mobile_switcher_scroll = 0;
             state.mode = Mode::Navigate;
         }
+        NavigateAction::AgentPicker => open_agent_picker(state),
         NavigateAction::PreviousWorkspace => {
             state.previous_workspace();
             leave_navigate_mode(state);
@@ -2052,6 +2216,356 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    fn mark_agent_pane(
+        state: &mut AppState,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        agent_state: crate::detect::AgentState,
+    ) {
+        let terminal_id = state.workspaces[ws_idx].tabs[state.workspaces[ws_idx].active_tab].panes
+            [&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = agent_state;
+    }
+
+    #[test]
+    fn agent_picker_opens_with_focused_agent_selected() {
+        let mut state = state_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let second = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        mark_agent_pane(&mut state, 0, root, crate::detect::AgentState::Working);
+        mark_agent_pane(&mut state, 0, second, crate::detect::AgentState::Working);
+        state.workspaces[0].layout.focus_pane(second);
+        let expected = crate::ui::agent_panel_entries(&state)
+            .iter()
+            .position(|entry| entry.ws_idx == 0 && entry.pane_id == second)
+            .unwrap();
+
+        execute_navigate_action(&mut state, NavigateAction::AgentPicker);
+
+        assert_eq!(state.mode, Mode::AgentPicker);
+        assert_eq!(state.agent_picker_selected, expected);
+        let entries = crate::ui::agent_panel_entries(&state);
+        assert_eq!(
+            resolve_agent_picker_target(&state, &entries),
+            Some((expected, 0, second))
+        );
+    }
+
+    #[test]
+    fn agent_picker_empty_open_stays_in_prior_mode_and_cancel_is_always_escapable() {
+        let mut state = state_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let stale_target = crate::app::state::PaneFocusTarget {
+            workspace_id: state.workspaces[0].id.clone(),
+            pane_id: root,
+        };
+        state.mode = Mode::Navigate;
+        state.agent_picker_selected = 9;
+        state.agent_picker_target = Some(stale_target.clone());
+        state.agent_panel_scroll = 7;
+        assert!(crate::ui::agent_panel_entries(&state).is_empty());
+
+        execute_navigate_action(&mut state, NavigateAction::AgentPicker);
+
+        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.agent_picker_selected, 0);
+        assert_eq!(state.agent_picker_target, None);
+        assert_eq!(state.agent_panel_scroll, 7);
+
+        state.mode = Mode::AgentPicker;
+        state.active = None;
+        state.agent_picker_target = Some(stale_target);
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.agent_picker_target, None);
+    }
+
+    #[test]
+    fn agent_picker_j_k_and_arrows_move_within_bounds() {
+        let mut state = state_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let second = state.workspaces[0].test_split(Direction::Horizontal);
+        let third = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        for pane_id in [root, second, third] {
+            mark_agent_pane(&mut state, 0, pane_id, crate::detect::AgentState::Working);
+        }
+        let first = crate::ui::agent_panel_entries(&state)[0].pane_id;
+        state.workspaces[0].layout.focus_pane(first);
+        execute_navigate_action(&mut state, NavigateAction::AgentPicker);
+
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
+        );
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+        );
+        assert_eq!(state.agent_picker_selected, 0);
+
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+        );
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(state.agent_picker_selected, 2);
+
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+        );
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(state.agent_picker_selected, 2);
+
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
+        );
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+        );
+        assert_eq!(state.agent_picker_selected, 0);
+        let entries = crate::ui::agent_panel_entries(&state);
+        assert_eq!(
+            resolve_agent_picker_target(&state, &entries).map(|(idx, _, _)| idx),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn agent_picker_keyboard_navigation_keeps_selection_visible() {
+        let mut state = state_with_workspaces(&["a", "b", "c", "d", "e", "f"]);
+        state.ensure_test_terminals();
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            mark_agent_pane(
+                &mut state,
+                ws_idx,
+                pane_id,
+                crate::detect::AgentState::Working,
+            );
+        }
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 10));
+        execute_navigate_action(&mut state, NavigateAction::AgentPicker);
+        let entry_count = crate::ui::agent_panel_entries(&state).len();
+
+        for _ in 1..entry_count {
+            handle_agent_picker_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+
+        assert_eq!(state.agent_picker_selected, entry_count - 1);
+        assert!(state.agent_panel_scroll > 0);
+    }
+
+    #[test]
+    fn agent_picker_initial_selection_uses_filtered_entries() {
+        let mut state = state_with_workspaces(&["hidden", "first", "focused"]);
+        state.ensure_test_terminals();
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            let agent_state = if ws_idx == 0 {
+                crate::detect::AgentState::Idle
+            } else {
+                crate::detect::AgentState::Working
+            };
+            mark_agent_pane(&mut state, ws_idx, pane_id, agent_state);
+        }
+        state.active = Some(2);
+        state.selected = 2;
+        state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "example.views".to_string(),
+            label: None,
+            filter: Some(crate::api::schema::AgentViewFilter::Eq {
+                field: crate::api::schema::AgentViewField::Builtin(
+                    crate::api::schema::AgentViewBuiltinField::Status,
+                ),
+                value: crate::api::schema::AgentViewValue::String("working".to_string()),
+            }),
+            sort: Vec::new(),
+        });
+        let entries = crate::ui::agent_panel_entries(&state);
+        let focused_pane = state.workspaces[2].focused_pane_id().unwrap();
+        let expected = entries
+            .iter()
+            .position(|entry| entry.ws_idx == 2 && entry.pane_id == focused_pane)
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+
+        execute_navigate_action(&mut state, NavigateAction::AgentPicker);
+
+        assert_eq!(state.agent_picker_selected, expected);
+        assert_eq!(
+            resolve_agent_picker_target(&state, &entries),
+            Some((expected, 2, focused_pane))
+        );
+    }
+
+    #[test]
+    fn agent_picker_escape_cancels_without_changing_focus() {
+        let mut state = state_with_workspaces(&["first", "second"]);
+        state.ensure_test_terminals();
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            mark_agent_pane(
+                &mut state,
+                ws_idx,
+                pane_id,
+                crate::detect::AgentState::Working,
+            );
+        }
+        let focused = state.workspaces[0].focused_pane_id();
+        execute_navigate_action(&mut state, NavigateAction::AgentPicker);
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.agent_picker_target, None);
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), focused);
+    }
+
+    #[test]
+    fn agent_picker_enter_focuses_exact_pane_across_workspaces() {
+        let mut app = app_with_test_workspaces(&["first", "second"]);
+        let first_root = app.state.workspaces[0].tabs[0].root_pane;
+        let second_root = app.state.workspaces[1].tabs[0].root_pane;
+        let target = app.state.workspaces[1].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        for (ws_idx, pane_id) in [(0, first_root), (1, second_root), (1, target)] {
+            mark_agent_pane(
+                &mut app.state,
+                ws_idx,
+                pane_id,
+                crate::detect::AgentState::Working,
+            );
+        }
+        app.execute_tui_navigate_action(NavigateAction::AgentPicker, ActionContext::Navigate);
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        let target_idx = entries
+            .iter()
+            .position(|entry| entry.ws_idx == 1 && entry.pane_id == target)
+            .unwrap();
+        for _ in 0..target_idx {
+            app.handle_agent_picker_key(TerminalKey::new(KeyCode::Down, KeyModifiers::empty()));
+        }
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        assert_eq!(
+            resolve_agent_picker_target(&app.state, &entries),
+            Some((target_idx, 1, target))
+        );
+
+        app.handle_agent_picker_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.agent_picker_target, None);
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target));
+    }
+
+    #[test]
+    fn agent_picker_enter_keeps_target_when_entries_reorder() {
+        let mut app = app_with_test_workspaces(&["first", "target"]);
+        for ws_idx in 0..app.state.workspaces.len() {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            mark_agent_pane(
+                &mut app.state,
+                ws_idx,
+                pane_id,
+                crate::detect::AgentState::Working,
+            );
+        }
+        let target_workspace_id = app.state.workspaces[1].id.clone();
+        let target_pane = app.state.workspaces[1].tabs[0].root_pane;
+        app.execute_tui_navigate_action(NavigateAction::AgentPicker, ActionContext::Navigate);
+        app.handle_agent_picker_key(TerminalKey::new(KeyCode::Down, KeyModifiers::empty()));
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        assert_eq!(
+            resolve_agent_picker_target(&app.state, &entries),
+            Some((1, 1, target_pane))
+        );
+
+        app.state.workspaces.swap(0, 1);
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        let reordered_entries = crate::ui::agent_panel_entries(&app.state);
+        assert_eq!(app.state.agent_picker_selected, 1);
+        assert_eq!(
+            resolve_agent_picker_target(&app.state, &reordered_entries),
+            Some((0, 0, target_pane))
+        );
+
+        app.handle_agent_picker_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].id, target_workspace_id);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(target_pane));
+    }
+
+    #[test]
+    fn agent_picker_missing_target_pane_exits_safely() {
+        let mut state = state_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let target = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        for pane_id in [root, target] {
+            mark_agent_pane(&mut state, 0, pane_id, crate::detect::AgentState::Working);
+        }
+        execute_navigate_action(&mut state, NavigateAction::AgentPicker);
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state
+                .agent_picker_target
+                .as_ref()
+                .map(|target| target.pane_id),
+            Some(target)
+        );
+        assert!(!state.workspaces[0].close_pane(target));
+        assert!(
+            resolve_agent_picker_target(&state, &crate::ui::agent_panel_entries(&state)).is_none()
+        );
+
+        handle_agent_picker_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.agent_picker_target, None);
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
     }
 
     #[test]
@@ -2646,6 +3160,19 @@ navigate_pane_right = "ctrl+l"
 
         assert_eq!(state.selected, 1);
         assert_eq!(state.mobile_switcher_scroll, 1);
+    }
+
+    #[test]
+    fn terminal_direct_agent_picker_shortcut_maps_to_navigation_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.agent_picker = crate::config::ActionKeybinds::direct("alt+a");
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            TerminalKey::new(KeyCode::Char('a'), KeyModifiers::ALT),
+        );
+
+        assert_eq!(action, Some(NavigateAction::AgentPicker));
     }
 
     #[test]

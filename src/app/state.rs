@@ -828,6 +828,7 @@ pub enum Mode {
     ReleaseNotes,
     ProductAnnouncement,
     Navigate,
+    AgentPicker,
     Prefix,
     Copy,
     Terminal,
@@ -866,6 +867,7 @@ impl Mode {
             self,
             Mode::Prefix
                 | Mode::Navigate
+                | Mode::AgentPicker
                 | Mode::Navigator
                 | Mode::Copy
                 | Mode::Resize
@@ -1424,6 +1426,8 @@ pub struct AppState {
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
+    pub agent_picker_selected: usize,
+    pub(crate) agent_picker_target: Option<PaneFocusTarget>,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1808,6 +1812,8 @@ impl AppState {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            agent_picker_selected: 0,
+            agent_picker_target: None,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
