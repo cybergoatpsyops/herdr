@@ -73,16 +73,24 @@ function nextReportSeq(): number {
 
 // Pi runs on Windows too, so the fallback path may be a drive-letter or UNC
 // path rather than a POSIX one. Only fully qualified paths are durable resume
-// identities: current-drive-rooted (\foo), drive-relative (C:foo), and
-// incomplete UNC (\\server) values are rejected.
+// identities: current-drive-rooted (\foo), drive-relative (C:foo), incomplete
+// UNC (\\server, //server), and device namespace (\\.\..., \\?\...) values
+// are rejected.
 function isAbsoluteSessionPath(file: unknown): file is string {
+  if (typeof file !== "string") {
+    return false;
+  }
+  // UNC-like values in either slash form need both a server and a share
+  // segment, and a device namespace server (. or ?) is not a normal UNC
+  // server.
+  if (file.startsWith("\\\\") || file.startsWith("//")) {
+    const unc = /^[\\/]{2}([^\\/]+)[\\/][^\\/]+/.exec(file);
+    return unc !== null && unc[1] !== "." && unc[1] !== "?";
+  }
   return (
-    typeof file === "string" &&
-    (path.posix.isAbsolute(file) ||
-      // Absolute drive-letter path: C:\ or C:/
-      /^[A-Za-z]:[\\/]/.test(file) ||
-      // Complete UNC path with both a server and a share segment.
-      /^\\\\[^\\/]+[\\/][^\\/]+/.test(file))
+    path.posix.isAbsolute(file) ||
+    // Absolute drive-letter path: C:\ or C:/
+    /^[A-Za-z]:[\\/]/.test(file)
   );
 }
 

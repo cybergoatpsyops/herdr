@@ -458,6 +458,12 @@ const piSessionIdentityCases = [
     identity: { agent_session_path: "\\\\server\\share\\.pi\\agent\\sessions\\pi-new.jsonl" },
   },
   {
+    slug: "slash-unc-path-only",
+    name: "falls back to a complete forward-slash UNC session path when no session ID exists",
+    session: { file: "//server/share/.pi/agent/sessions/pi-new.jsonl" },
+    identity: { agent_session_path: "//server/share/.pi/agent/sessions/pi-new.jsonl" },
+  },
+  {
     slug: "current-drive-rooted-path-only",
     name: "reports no session identity for a current-drive-rooted Windows session path",
     session: { file: "\\foo" },
@@ -473,6 +479,60 @@ const piSessionIdentityCases = [
     slug: "incomplete-unc-path-only",
     name: "reports no session identity for an incomplete UNC session path",
     session: { file: "\\\\server" },
+    identity: {},
+  },
+  {
+    slug: "slash-pair-only",
+    name: "reports no session identity for a bare double-slash session path",
+    session: { file: "//" },
+    identity: {},
+  },
+  {
+    slug: "incomplete-slash-unc-path-only",
+    name: "reports no session identity for a share-less forward-slash UNC session path",
+    session: { file: "//server" },
+    identity: {},
+  },
+  {
+    slug: "incomplete-slash-unc-no-share",
+    name: "reports no session identity for a forward-slash UNC session path without a share",
+    session: { file: "//server/" },
+    identity: {},
+  },
+  {
+    slug: "device-drive-path-only",
+    name: "reports no session identity for a device namespace drive session path",
+    session: { file: "\\\\?\\C:\\Users\\User\\.pi\\agent\\sessions\\pi-new.jsonl" },
+    identity: {},
+  },
+  {
+    slug: "slash-device-drive-path-only",
+    name: "reports no session identity for a slash-normalized device namespace drive session path",
+    session: { file: "//?/C:/Users/User/.pi/agent/sessions/pi-new.jsonl" },
+    identity: {},
+  },
+  {
+    slug: "device-pipe-path-only",
+    name: "reports no session identity for a device namespace pipe session path",
+    session: { file: "\\\\.\\pipe\\herdr-pi" },
+    identity: {},
+  },
+  {
+    slug: "slash-device-pipe-path-only",
+    name: "reports no session identity for a slash-normalized device namespace pipe session path",
+    session: { file: "//./pipe/herdr-pi" },
+    identity: {},
+  },
+  {
+    slug: "device-unc-path-only",
+    name: "reports no session identity for a device namespace UNC session path",
+    session: { file: "\\\\?\\UNC\\server\\share\\pi-new.jsonl" },
+    identity: {},
+  },
+  {
+    slug: "slash-device-unc-path-only",
+    name: "reports no session identity for a slash-normalized device namespace UNC session path",
+    session: { file: "//?/UNC/server/share/pi-new.jsonl" },
     identity: {},
   },
   {
