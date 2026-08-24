@@ -2,10 +2,11 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=8
+// HERDR_INTEGRATION_VERSION=9
 // @ts-nocheck
 
 import net from "node:net";
+import path from "node:path";
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
@@ -70,39 +71,77 @@ function nextReportSeq(): number {
   return reportSeq;
 }
 
+// Pi runs on Windows too, so the fallback path may be a drive-letter or UNC
+// path rather than a POSIX one. Only fully qualified paths are durable resume
+// identities: current-drive-rooted (\foo), drive-relative (C:foo), incomplete
+// UNC (\\server, //server), and device namespace (\\.\..., \\?\...) values
+// are rejected.
+function isAbsoluteSessionPath(file: unknown): file is string {
+  if (typeof file !== "string") {
+    return false;
+  }
+  // UNC-like values in either slash form need both a server and a share
+  // segment, and a device namespace server (. or ?) is not a normal UNC
+  // server.
+  if (file.startsWith("\\\\") || file.startsWith("//")) {
+    const unc = /^[\\/]{2}([^\\/]+)[\\/][^\\/]+/.exec(file);
+    return unc !== null && unc[1] !== "." && unc[1] !== "?";
+  }
+  return (
+    path.posix.isAbsolute(file) ||
+    // Absolute drive-letter path: C:\ or C:/
+    /^[A-Za-z]:[\\/]/.test(file)
+  );
+}
+
+// session_start is the identity reset boundary: a replacement session must not
+// inherit the previous session's ID or path.
+function resetSessionRef(): void {
+  currentAgentSessionId = undefined;
+  currentAgentSessionPath = undefined;
+}
+
+// Later lifecycle events only merge valid observations: a missing or throwing
+// read must not downgrade a confirmed official ID (or fallback path) that
+// Herdr already received. Only resetSessionRef() clears them.
 function updateSessionRef(ctx: any): void {
   try {
     const file = ctx?.sessionManager?.getSessionFile?.();
-    currentAgentSessionPath =
-      typeof file === "string" && file.startsWith("/") ? file : undefined;
+    if (isAbsoluteSessionPath(file)) {
+      currentAgentSessionPath = file;
+    }
   } catch {
-    currentAgentSessionPath = undefined;
+    // keep the last valid session path
   }
 
   try {
     const id = ctx?.sessionManager?.getSessionId?.();
-    currentAgentSessionId = typeof id === "string" && id.length > 0 ? id : undefined;
+    if (typeof id === "string" && id.length > 0) {
+      currentAgentSessionId = id;
+    }
   } catch {
-    currentAgentSessionId = undefined;
+    // keep the last confirmed session ID
   }
 }
 
+// The official session ID is the durable resume key; the session path is only a
+// provisional fallback for sessions that have not exposed a valid ID yet.
 function withSessionRef(params: Record<string, unknown>): Record<string, unknown> {
-  if (currentAgentSessionPath) {
-    return { ...params, agent_session_path: currentAgentSessionPath };
-  }
   if (currentAgentSessionId) {
     return { ...params, agent_session_id: currentAgentSessionId };
+  }
+  if (currentAgentSessionPath) {
+    return { ...params, agent_session_path: currentAgentSessionPath };
   }
   return params;
 }
 
 function currentSessionRef(): Record<string, unknown> | undefined {
-  if (currentAgentSessionPath) {
-    return { agent_session_path: currentAgentSessionPath };
-  }
   if (currentAgentSessionId) {
     return { agent_session_id: currentAgentSessionId };
+  }
+  if (currentAgentSessionPath) {
+    return { agent_session_path: currentAgentSessionPath };
   }
   return undefined;
 }
@@ -229,6 +268,7 @@ export default function (pi) {
       return;
     }
     rootSession = true;
+    resetSessionRef();
     updateSessionRef(ctx);
     await reportSession(event?.reason);
     // A reload can replace this extension mid-run without emitting another agent_start.

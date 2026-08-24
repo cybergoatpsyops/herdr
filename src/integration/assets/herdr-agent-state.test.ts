@@ -426,6 +426,307 @@ test("Pi waits for a replacement session report before publishing state", async 
   ]);
 });
 
+const piSessionIdentityCases = [
+  {
+    slug: "id-and-path",
+    name: "reports the official session ID when both the ID and path exist",
+    session: { file: "/tmp/pi-new.jsonl", id: "pi-new" },
+    identity: { agent_session_id: "pi-new" },
+  },
+  {
+    slug: "id-only",
+    name: "reports the official session ID when only the ID exists",
+    session: { id: "pi-new" },
+    identity: { agent_session_id: "pi-new" },
+  },
+  {
+    slug: "path-only",
+    name: "falls back to the session path when no session ID exists",
+    session: { file: "/tmp/pi-new.jsonl" },
+    identity: { agent_session_path: "/tmp/pi-new.jsonl" },
+  },
+  {
+    slug: "windows-path-only",
+    name: "falls back to an absolute Windows drive-letter session path when no session ID exists",
+    session: { file: "C:\\Users\\User\\.pi\\agent\\sessions\\pi-new.jsonl" },
+    identity: { agent_session_path: "C:\\Users\\User\\.pi\\agent\\sessions\\pi-new.jsonl" },
+  },
+  {
+    slug: "unc-path-only",
+    name: "falls back to an absolute UNC session path when no session ID exists",
+    session: { file: "\\\\server\\share\\.pi\\agent\\sessions\\pi-new.jsonl" },
+    identity: { agent_session_path: "\\\\server\\share\\.pi\\agent\\sessions\\pi-new.jsonl" },
+  },
+  {
+    slug: "slash-unc-path-only",
+    name: "falls back to a complete forward-slash UNC session path when no session ID exists",
+    session: { file: "//server/share/.pi/agent/sessions/pi-new.jsonl" },
+    identity: { agent_session_path: "//server/share/.pi/agent/sessions/pi-new.jsonl" },
+  },
+  {
+    slug: "current-drive-rooted-path-only",
+    name: "reports no session identity for a current-drive-rooted Windows session path",
+    session: { file: "\\foo" },
+    identity: {},
+  },
+  {
+    slug: "drive-relative-path-only",
+    name: "reports no session identity for a drive-relative Windows session path",
+    session: { file: "C:foo" },
+    identity: {},
+  },
+  {
+    slug: "incomplete-unc-path-only",
+    name: "reports no session identity for an incomplete UNC session path",
+    session: { file: "\\\\server" },
+    identity: {},
+  },
+  {
+    slug: "slash-pair-only",
+    name: "reports no session identity for a bare double-slash session path",
+    session: { file: "//" },
+    identity: {},
+  },
+  {
+    slug: "incomplete-slash-unc-path-only",
+    name: "reports no session identity for a share-less forward-slash UNC session path",
+    session: { file: "//server" },
+    identity: {},
+  },
+  {
+    slug: "incomplete-slash-unc-no-share",
+    name: "reports no session identity for a forward-slash UNC session path without a share",
+    session: { file: "//server/" },
+    identity: {},
+  },
+  {
+    slug: "device-drive-path-only",
+    name: "reports no session identity for a device namespace drive session path",
+    session: { file: "\\\\?\\C:\\Users\\User\\.pi\\agent\\sessions\\pi-new.jsonl" },
+    identity: {},
+  },
+  {
+    slug: "slash-device-drive-path-only",
+    name: "reports no session identity for a slash-normalized device namespace drive session path",
+    session: { file: "//?/C:/Users/User/.pi/agent/sessions/pi-new.jsonl" },
+    identity: {},
+  },
+  {
+    slug: "device-pipe-path-only",
+    name: "reports no session identity for a device namespace pipe session path",
+    session: { file: "\\\\.\\pipe\\herdr-pi" },
+    identity: {},
+  },
+  {
+    slug: "slash-device-pipe-path-only",
+    name: "reports no session identity for a slash-normalized device namespace pipe session path",
+    session: { file: "//./pipe/herdr-pi" },
+    identity: {},
+  },
+  {
+    slug: "device-unc-path-only",
+    name: "reports no session identity for a device namespace UNC session path",
+    session: { file: "\\\\?\\UNC\\server\\share\\pi-new.jsonl" },
+    identity: {},
+  },
+  {
+    slug: "slash-device-unc-path-only",
+    name: "reports no session identity for a slash-normalized device namespace UNC session path",
+    session: { file: "//?/UNC/server/share/pi-new.jsonl" },
+    identity: {},
+  },
+  {
+    slug: "no-identity",
+    name: "reports no session identity when neither the ID nor path exists",
+    session: {},
+    identity: {},
+  },
+] as const;
+
+for (const identityCase of piSessionIdentityCases) {
+  test(`Pi ${identityCase.name}`, async () => {
+    const requests = await startRecordingServer(`pi-session-${identityCase.slug}`);
+    const { handlers, pi } = createExtensionHarness();
+    const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+    install(pi);
+
+    await handlers.get("session_start")?.(
+      { reason: "startup" },
+      piContext(() => true, identityCase.session),
+    );
+    await waitFor(() => requestStates(requests).length === 1);
+
+    const hasIdentity = Object.keys(identityCase.identity).length > 0;
+    expect(sessionReports(requests)).toHaveLength(hasIdentity ? 1 : 0);
+    for (const request of requests) {
+      expect(sessionIdentity(request)).toEqual(identityCase.identity);
+    }
+  });
+}
+
+test("Pi keeps the official session ID on later session and state reports", async () => {
+  const requests = await startRecordingServer("pi-session-id-precedence");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = piContext(() => idle, { file: "/tmp/pi-new.jsonl", id: "pi-new" });
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  idle = false;
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(
+    () => sessionReports(requests).length === 2 && requestStates(requests).length === 2,
+  );
+
+  idle = true;
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 3);
+
+  expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
+  expect(requests).toHaveLength(5);
+  for (const request of requests) {
+    expect(sessionIdentity(request)).toEqual({ agent_session_id: "pi-new" });
+  }
+});
+
+test("Pi upgrades from the fallback session path to the official session ID", async () => {
+  const requests = await startRecordingServer("pi-session-id-upgrade");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  // session_start only exposes the path; Pi publishes the official ID later.
+  const session: { file?: string; id?: string } = { file: "/tmp/pi-new.jsonl" };
+  const context = piContext(() => idle, session);
+
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+  expect(requests.map(sessionIdentity)).toEqual([
+    { agent_session_path: "/tmp/pi-new.jsonl" },
+    { agent_session_path: "/tmp/pi-new.jsonl" },
+  ]);
+
+  const requestsBeforeUpgrade = requests.length;
+  idle = false;
+  session.id = "pi-new";
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(
+    () => sessionReports(requests).length === 2 && requestStates(requests).length === 2,
+  );
+
+  idle = true;
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 3);
+
+  expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
+  expect(requests).toHaveLength(5);
+  for (const request of requests.slice(requestsBeforeUpgrade)) {
+    expect(sessionIdentity(request)).toEqual({ agent_session_id: "pi-new" });
+  }
+});
+
+test("Pi retains the official session ID when a later identity read returns no ID", async () => {
+  const requests = await startRecordingServer("pi-session-id-missing-read");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  // The session confirms an official ID first; a later read only sees the path.
+  const session: { file?: string; id?: string } = { file: "/tmp/pi-new.jsonl", id: "pi-new" };
+  const context = piContext(() => idle, session);
+
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  idle = false;
+  session.id = undefined;
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(
+    () => sessionReports(requests).length === 2 && requestStates(requests).length === 2,
+  );
+
+  idle = true;
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 3);
+
+  expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
+  expect(requests).toHaveLength(5);
+  for (const request of requests) {
+    expect(sessionIdentity(request)).toEqual({ agent_session_id: "pi-new" });
+  }
+});
+
+test("Pi retains the official session ID when a later identity read throws", async () => {
+  const requests = await startRecordingServer("pi-session-id-throwing-read");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = piContext(() => idle, { file: "/tmp/pi-new.jsonl", id: "pi-new" });
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  idle = false;
+  const throwingContext = {
+    hasUI: true,
+    mode: "tui",
+    isIdle: () => idle,
+    sessionManager: {
+      getSessionFile: () => "/tmp/pi-new.jsonl",
+      getSessionId: () => {
+        throw new Error("session id unavailable");
+      },
+    },
+  };
+  handlers.get("agent_start")?.({}, throwingContext);
+  await waitFor(
+    () => sessionReports(requests).length === 2 && requestStates(requests).length === 2,
+  );
+
+  idle = true;
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 3);
+
+  expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
+  expect(requests).toHaveLength(5);
+  for (const request of requests) {
+    expect(sessionIdentity(request)).toEqual({ agent_session_id: "pi-new" });
+  }
+});
+
+test("Pi session_start clears the previous official session ID for a path-only session", async () => {
+  const requests = await startRecordingServer("pi-session-start-reset");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  await handlers.get("session_start")?.(
+    { reason: "startup" },
+    piContext(() => true, { file: "/tmp/pi-old.jsonl", id: "pi-old" }),
+  );
+  await waitFor(() => requestStates(requests).length === 1);
+
+  // The replacement session only exposes a path, so the old ID must not leak.
+  await handlers.get("session_start")?.(
+    { reason: "new" },
+    piContext(() => true, { file: "/tmp/pi-new.jsonl" }),
+  );
+  await waitFor(() => requestStates(requests).length === 2);
+
+  expect(requests.map(sessionIdentity)).toEqual([
+    { agent_session_id: "pi-old" },
+    { agent_session_id: "pi-old" },
+    { agent_session_path: "/tmp/pi-new.jsonl" },
+    { agent_session_path: "/tmp/pi-new.jsonl" },
+  ]);
+});
+
 async function startDroppedFirstResponseServer(name: string) {
   const recordingSocketPath = join(tmpdir(), `herdr-${name}-${process.pid}.sock`);
   socketPath = recordingSocketPath;
@@ -545,14 +846,14 @@ function completionHandlers(handlers: Map<string, Handler>): string[] {
   return ["agent_end", "agent_settled"].filter((event) => handlers.has(event));
 }
 
-function piContext(isIdle: () => boolean) {
+function piContext(isIdle: () => boolean, session: { file?: string; id?: string } = {}) {
   return {
     hasUI: true,
     mode: "tui",
     isIdle,
     sessionManager: {
-      getSessionFile: () => undefined,
-      getSessionId: () => undefined,
+      getSessionFile: () => session.file,
+      getSessionId: () => session.id,
     },
   };
 }
@@ -561,6 +862,25 @@ function requestStates(requests: unknown[]): unknown[] {
   return requests
     .filter((request) => isRecord(request) && request.method === "pane.report_agent")
     .map(requestState);
+}
+
+function sessionReports(requests: unknown[]): unknown[] {
+  return requests.filter(
+    (request) => isRecord(request) && request.method === "pane.report_agent_session",
+  );
+}
+
+function sessionIdentity(request: unknown): Record<string, unknown> {
+  if (!isRecord(request) || !isRecord(request.params)) {
+    return {};
+  }
+  const identity: Record<string, unknown> = {};
+  for (const key of ["agent_session_id", "agent_session_path"]) {
+    if (key in request.params) {
+      identity[key] = request.params[key];
+    }
+  }
+  return identity;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
