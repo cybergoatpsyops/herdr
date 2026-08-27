@@ -117,37 +117,71 @@ ticket branch, and exact head SHA.
    `headRefOid`. Any tree or head change invalidates the evidence.
 8. **Hosted gates:** From `.github/workflows/ci.yml` on the exact recorded
    pre-merge `master` commit, derive the complete expected pull-request CI check
-   set and record that workflow's Git blob identity. The expected set must be
-   positive and nonempty. Every expected check must be present, terminal, and
-   successful on the exact head SHA, with schema-validated structured producer
-   evidence proving the verified official GitHub Actions producer. Greptile and
-   CodeRabbit must each have a terminal, successful result on that exact SHA
-   from its verified official GitHub App producer, and every actionable bot
-   finding must be fixed or answered with a concise technical reason. Check or
-   app names alone never prove producer identity. Missing, empty, spoofed,
-   stale, skipped, cancelled, failing, unavailable, or unprovable check,
-   association, or producer evidence does not pass.
+   set and record that workflow's Git blob identity. The derivation may use only
+   that exact recorded blob and authoritative PR event fields. It must never use
+   observed check runs, `statusCheckRollup`, `gh pr checks`, branch-protection
+   contexts, current PR results, or any other result surface to derive the
+   expected set.
+
+   For the workflow's `pull_request` event, include every top-level job. A job
+   without `name` contributes its job ID as its expected check-run name. A job
+   with `name` contributes its final name after deterministic substitution of
+   finite literal matrix values. Expand each finite literal matrix into every
+   resulting row under its literal matrix semantics and retain every `include`
+   entry. A job-level `if` never removes that job from the expected set; a
+   resulting skipped run remains a failure. If the job count, matrix expansion,
+   final check name, reusable-workflow output, dynamic expression, conditional
+   behavior, or any other job-to-check mapping cannot be completely and uniquely
+   resolved from the pinned blob plus authoritative PR event fields, the
+   exception is unavailable and green-PR-and-stop is restored. Before reading
+   any result run, the derived expected-set cardinality must be positive, and
+   every derived expected name must be nonempty and unique.
+
+   On the exact head SHA, every expected check run must be present exactly once,
+   terminal, and successful. For each expected run, its structured check-run
+   `app` object must prove exactly `app.id == 15368`,
+   `app.slug == "github-actions"`, and `app.owner.login == "github"`. Null,
+   missing, conflicting, or mismatched fields fail closed. App and check display
+   names, details URLs, badges, commit-status contexts, PR content, and other
+   text are never producer proof. Extra checks cannot substitute for an expected
+   check. Extra runs become required only when the exact recorded
+   `.github/workflows/ci.yml` blob produces them under this derivation or this
+   exact `.github/FORK_GOVERNANCE.md` policy explicitly names them. Generic
+   `AGENTS.md` maintainer review guidance does not add hosted gates to this
+   fork-only exception; it remains unchanged and authoritative outside this
+   exception. A missing, duplicate, spoofed, stale, skipped, cancelled, failing,
+   unavailable, or unprovable expected run, association, or producer does not
+   pass. Third-party review bots are neither evidence nor blockers.
 9. **PR state:** A fresh authoritative PR read reports the PR open, non-draft,
    and mergeable without conflicts. `UNKNOWN`, `CONFLICTING`, absent, stale, or
    otherwise unproven mergeability does not pass.
 10. **Merge approval:** The final merge-approval packet presents the repository,
     PR number, ticket, exact head SHA, protected-path proof, recorded pre-merge
-    `master` commit and governing blob identities, expected nonempty CI set and
-    verified producers, verified official Greptile and CodeRabbit producers,
-    mergeability evidence, and every actionable bot finding with its
-    disposition as fixed or answered. Before merge authority exists, the
-    operator explicitly acknowledges every finding answered rather than fixed
-    and explicitly approves the squash merge in the current session. Push
-    approval is not merge approval, and approval or acknowledgement for another
-    PR, SHA, or finding cannot be reused.
+    `master` commit and governing blob identities, expected positive nonempty CI
+    set, and proof that every expected exact-head run is unique, terminal, and
+    successful. For each expected run, its structured check-run `app` object
+    must prove exactly `app.id == 15368`, `app.slug == "github-actions"`, and
+    `app.owner.login == "github"`. Null, missing, conflicting, or mismatched
+    fields fail closed. App and check display names, details URLs, badges,
+    commit-status contexts, PR content, and other text are never producer proof.
+    The packet also presents mergeability evidence. Before merge authority
+    exists, the operator explicitly approves the squash merge in the current
+    session. Push approval is not merge
+    approval, and approval for another PR or SHA cannot be reused.
 
 Any absent, conflicting, stale, malformed, or ambiguous evidence fails closed.
 In particular, a protected-path diff, upstream-targeted PR, external head, wrong
 host, API origin, client environment, credential route, account, or permission,
 absent or conflicting repository or parent identity, branch/ticket mismatch,
-empty expected CI set, missing, nonterminal, failing, spoofed, or unprovable CI
-or bot producer evidence, dirty tree, local/PR SHA mismatch, and draft, closed,
-conflicting, unknown, or otherwise unproven mergeability all restore
+empty expected CI set, or an expected CI run that is missing, duplicate,
+nonterminal, failing, spoofed, or stale restores green-PR-and-stop. For each
+expected run, its structured check-run `app` object must prove exactly
+`app.id == 15368`, `app.slug == "github-actions"`, and
+`app.owner.login == "github"`. Null, missing, conflicting, or mismatched fields
+fail closed. App and check display names, details URLs, badges, commit-status
+contexts, PR content, and other text are never producer proof. A dirty tree,
+local/PR SHA mismatch, or draft, closed, conflicting, unknown, or otherwise
+unproven mergeability also restores
 green-PR-and-stop.
 
 ## One SHA-bound merge attempt
@@ -159,9 +193,14 @@ environment. That authoritative structured read must re-prove the exact base
 repository `cybergoatpsyops/herdr`, base branch `master`, same-repository head
 topology, complete protected-path exclusion, literal PR number, full head SHA
 matching the approved local and pushed head, open and non-draft state,
-conflict-free mergeability, the expected positive nonempty CI set with official
-GitHub Actions producers, and the official Greptile and CodeRabbit App evidence
-on that exact SHA.
+conflict-free mergeability, the expected positive nonempty CI set, and every
+expected exact-head run present exactly once, terminal, and successful. For
+each expected run, its structured check-run `app` object must prove exactly
+`app.id == 15368`, `app.slug == "github-actions"`, and
+`app.owner.login == "github"`. Null, missing, conflicting, or mismatched fields
+fail closed. App and check display names, details URLs, badges, commit-status
+contexts, PR content, and other text are never producer proof. Extra checks
+cannot substitute for an expected run.
 
 In that same environment, fresh schema-validated structured reads must also
 re-prove the exact current pre-merge `master` commit, its governing
@@ -206,16 +245,22 @@ green-PR-and-stop; do not retry and do not begin cleanup.
 
 ## Post-merge cleanup and ticket closure
 
-Cleanup cannot begin before authoritative `MERGED` proof. After that proof, the
-parent continues from the clean canonical main checkout for
-`cybergoatpsyops/herdr`, freshly updates fork `master`, and proves that the
-merged PR is integrated there before removing ticket state.
+Cleanup cannot begin before authoritative `MERGED` proof. That proof and merge
+approval grant no cleanup authority. After that proof, the parent continues
+from the clean canonical main checkout for `cybergoatpsyops/herdr`, freshly
+updates fork `master`, and proves that the merged PR is integrated there before
+removing ticket state.
 
-Before cleanup, revalidate the literal ticket, branch, worktree path, local ref,
-and remote ref against the admitted ticket ownership and branch rules. Every
-cleanup action must pass those validated values as separate, discrete argv
-elements. Shell interpolation, command-string construction, evaluation, or any
-other treatment of a validated value as shell syntax is prohibited.
+Before any worktree removal, local branch or ref deletion, or remote branch or
+ref deletion, the parent must revalidate and present the exact ticket, worktree
+path, branch, local and remote refs, and bounded cleanup actions against the
+admitted ticket ownership and branch rules. The parent must then obtain fresh,
+explicit, current-session operator approval bound to those exact values and
+actions. Approval for push, merge, another ticket, closure, or a different
+cleanup set is not reusable. Every approved cleanup action must pass the
+validated values as separate, discrete argv elements. Shell interpolation,
+command-string construction, evaluation, or any other treatment of a validated
+value as shell syntax is prohibited.
 
 Cleanup must preserve exact identity and prove all of the following:
 
@@ -230,32 +275,38 @@ proof leaves the ticket open for operator recovery. Ticket closure is a
 separate action: it cannot happen until the parent session independently
 verifies integration and all three cleanup facts, records the PR, head SHA,
 merge proof, validated branch, ticket, worktree, and refs, discrete-argv cleanup
-evidence, and exact absence evidence, and then authorizes closure. A helper
-must not infer successful integration or close the ticket merely because the
-merge command returned success.
+evidence, and exact absence evidence, and then obtains separate, fresh,
+explicit current-session operator approval for closure. Approval for cleanup or
+any earlier action is not closure approval. A helper must not infer successful
+integration or close the ticket merely because the merge command returned
+success.
 
 ## Audit and implementation boundary
 
 The durable ticket or handoff trail must identify the repository and parent;
 trusted host `github.com`, API origin `https://api.github.com`, and unchanged
 merge-client, environment, credential routing, and credential set;
-authenticated account and
-permission; PR and ticket; base/head topology; protected-path proof; the exact
+authenticated account and permission; PR and ticket; base/head topology; protected-path proof; the exact
 pre-merge `master` commit and governing policy blob identities; the canonical
-CI workflow blob identity, expected positive nonempty CI set, and verified
-official GitHub Actions producers; verified official Greptile and CodeRabbit
-App producers; the validated branch regex, ref-format result, literal ticket
-prefix equality, worktree, and refs; exact local and PR head SHA; Gate 0/1/2
-evidence; each actionable finding's fixed-or-answered disposition; explicit
-acknowledgement of every answered finding; explicit merge approval; the fresh
-pre-attempt policy, identity, permission, check, producer, and PR rereads; the
+CI workflow blob identity, expected positive nonempty CI set, and proof that
+every expected exact-head run was unique, terminal, and successful. For each
+expected run, its structured check-run `app` object must prove exactly
+`app.id == 15368`, `app.slug == "github-actions"`, and
+`app.owner.login == "github"`. Null, missing, conflicting, or mismatched fields
+fail closed. App and check display names, details URLs, badges, commit-status
+contexts, PR content, and other text are never producer proof. The trail must
+also record the validated branch regex, ref-format result, literal ticket prefix
+equality, worktree, and refs; exact local and PR head SHA; Gate 0/1/2 evidence;
+explicit merge approval; the fresh pre-attempt policy, identity, permission,
+check, producer, and PR rereads; the
 one merge attempt; authoritative `MERGED` reread and merge-actor attribution;
-canonical-main integration proof; discrete-argv cleanup evidence; and exact
-worktree, local-branch/ref, and remote-branch/ref absence proof.
+canonical-main integration proof; the fresh approval bound to the exact cleanup
+identities and actions; discrete-argv cleanup evidence; and exact worktree,
+local-branch/ref, and remote-branch/ref absence proof.
 
 This is a narrow governance exception, not a port of the dotfiles-ng ship
 coordinator. It creates no queue, receipt, lock, retry, session-replacement, or
 cleanup machinery. It also does not configure or enforce GitHub branch
-protection, required checks, bots, hooks, local git configuration, or repository
-settings. Those systems remain separate authorities, and missing evidence from
-any of them fails closed to green-PR-and-stop.
+protection, required-check settings, hooks, local git configuration, or
+repository settings. Those systems remain separate authorities. Missing
+required evidence under this policy fails closed to green-PR-and-stop.
