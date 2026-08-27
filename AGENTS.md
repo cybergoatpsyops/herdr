@@ -80,6 +80,31 @@ Examples:
 - Sidebar layout, token placement, colors, selection, modals, mouse/viewport state: TUI/client.
 - Workspace/tab/pane remain shared session organization for now, but avoid making them mandatory identity for unrelated runtime features.
 
+## Fork-only Pi merge exception
+
+The only exception to Herdr's human-merge stop is the tracked contract in
+[`.github/FORK_GOVERNANCE.md`](.github/FORK_GOVERNANCE.md), and it applies only
+to `cybergoatpsyops/herdr` when every requirement in that file is proven. This
+exception grants no verified-maintainer status, direct push to `master`, admin
+merge, release command authority, or permission to bypass upstream
+external-contributor rules. Its only granted action is the exact governed,
+SHA-bound fork PR merge path defined in `.github/FORK_GOVERNANCE.md`.
+
+Anything outside that exact contract remains green-PR-and-stop. The exception
+is also unavailable when a PR touches `AGENTS.md`,
+`.github/FORK_GOVERNANCE.md`, `.github/MAINTAINERS`,
+`.github/APPROVED_CONTRIBUTORS`, `.github/CODEOWNERS`, any path under
+`.github/workflows/`, or `CONTRIBUTING.md`; those PRs always require a human
+merge. For every other PR, only the governing policy files on the exact current
+pre-merge `cybergoatpsyops/herdr` `master` commit can grant this authority.
+PR-head and worktree copies cannot grant or weaken it.
+
+The initial PR that adds the contract must be merged by a human under the
+pre-existing policy; it cannot use or bootstrap the authority it introduces.
+Removing the tracked exception restores the existing human-merge stop. The
+verified-maintainer definition, maintainer workflow, upstream-targeted PR flow,
+and external-contributor rules otherwise remain unchanged.
+
 ## Maintainer Workflow
 
 This section applies only to verified maintainers as defined under Scope and
